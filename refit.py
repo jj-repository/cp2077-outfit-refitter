@@ -372,6 +372,59 @@ def buffer_gate(arch, src_of):
     return bad
 
 
+# ---------------- archives packed without a file-name list ----------------
+
+DEPOT_PATH = re.compile(rb"[A-Za-z0-9_\-\\/.{}]{4,}\.[a-z0-9_]{2,12}")
+
+
+def recover_names(src, arcs):
+    r"""Old archives (game 1.6 era) have no file-name list, so WolvenKit unbundles their own files as <hash>.bin
+    (vanilla paths it knows are already named). Every depot path mentioned inside the extracted files, the .xl next
+    to the archive and the r6\tweaks .yaml is hashed and matched; matched files move to their real path.
+    One pass is enough: strings are read from every file, named or not. -> (named, still unnamed)."""
+    bins = {}
+    for p in glob.glob(os.path.join(src, "*.bin")):
+        stem = os.path.splitext(os.path.basename(p))[0]
+        if stem.isdigit():
+            bins[int(stem)] = p
+    texts = []
+    for a in arcs:
+        d = os.path.dirname(a)
+        texts += glob.glob(os.path.join(d, "*.xl"))
+        if [x.lower() for x in os.path.normpath(d).split(os.sep)[-3:]] == [
+            "archive",
+            "pc",
+            "mod",
+        ]:
+            tw = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(d))), "r6", "tweaks"
+            )
+            texts += glob.glob(os.path.join(tw, "**", "*.y*ml"), recursive=True)
+    texts += glob.glob(os.path.join(src, "**", "*"), recursive=True)
+    names = {}
+    for t in texts:
+        if not bins or not os.path.isfile(t):
+            continue
+        for m in DEPOT_PATH.finditer(open(t, "rb").read()):
+            n = m.group().decode("latin-1").lstrip("*").replace("/", "\\").lower()
+            h = rdar.fnv(n)
+            if h in bins and h not in names:
+                names[h] = n
+    found = 0
+    for h, n in names.items():
+        dst = os.path.normpath(os.path.join(src, n))
+        if (  # names come from the download: never let one point outside the folder
+            os.path.commonpath([dst, os.path.normpath(src)]) != os.path.normpath(src)
+            or ":" in n
+            or os.path.exists(dst)
+        ):
+            continue
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        os.replace(bins[h], dst)
+        found += 1
+    return found, len(bins) - found
+
+
 # ---------------- one outfit ----------------
 
 
@@ -385,19 +438,30 @@ def refit_mod(
     )
     for d in (src, glbd, raw, pack, out):
         os.makedirs(d, exist_ok=True)
+    nameless = [os.path.basename(a) for a in arcs if not rdar.Rdar(a).names]
     for a in arcs:
-        if not rdar.Rdar(a).names:
-            log(
-                "%s has no file names inside (packed in a way that can't be refit); skipped."
-                % os.path.basename(a)
-            )
-            continue
         run([wk, "unbundle", a, "-o", src], game)
+    if nameless:
+        found, left = recover_names(src, arcs)
+        log(
+            "%s has no file names inside (an older way of packing); found %d of them from the other files%s."
+            % (
+                ", ".join(nameless),
+                found,
+                ", %d stay unnamed (not needed for the refit)" % left if left else "",
+            )
+        )
     meshes = {
         os.path.relpath(p, src).replace("/", "\\").lower(): p
         for p in glob.glob(os.path.join(src, "**", "*.mesh"), recursive=True)
     }
     if not meshes:
+        if nameless:
+            raise ToolError(
+                "Couldn't find the clothing inside %s (it's packed without file names and no other file "
+                "points to the clothing). This outfit can't be refit."
+                % ", ".join(nameless)
+            )
         log("No clothing meshes in this mod.")
         return None
     # ArchiveXL dynamic families: paths are hashed in the binary files, WolvenKit resolves them when serializing

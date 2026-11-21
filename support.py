@@ -182,12 +182,10 @@ def outfit_parts(path):
     xls = sorted(
         os.path.basename(f)
         for f in files
-        if f.lower().endswith(".xl")
-        and os.path.normcase(os.path.dirname(f)) in dirs
-        and not (
-            core.VARIANT_BODY.search(os.path.basename(f)) and "vanilla" not in f.lower()
-        )
+        if f.lower().endswith(".xl") and os.path.normcase(os.path.dirname(f)) in dirs
     )
+    if any("vanilla" in x.lower() for x in xls):  # e.g. a_vanilla.xl beside a_ebb.xl: only the vanilla one counts
+        xls = [x for x in xls if "vanilla" in x.lower() or not core.VARIANT_BODY.search(x)]
     tweaks = []
     for f in files:
         parts = os.path.relpath(f, root).split(os.sep)

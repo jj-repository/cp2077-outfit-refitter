@@ -112,8 +112,11 @@ It contains no file contents, and your Windows user name is replaced. You can op
 - **Some parts are skipped on purpose**, and the log says why: glasses, hats and other things that don't
   touch the body, male meshes, versions for other bodies (EBB, RB, ...), and parts the mod already ships
   an Angel/EVE version of.
-- **Some outfits can't be refit**: very old mods, mods whose files have no names inside, and a few meshes
-  WolvenKit can't read or write. The tool skips those parts, tells you, and refits the rest.
+- **Old outfits work too** (since 1.3): many outfits from before game 2.0 were packed without file names.
+  The tool finds the names again from the outfit's other files and refits them like any other outfit. If it
+  gives you a version made for another body (EBB, RB, ...), the log warns you; get the vanilla one if there is one.
+- **Some parts can't be refit**: a few meshes WolvenKit can't read or write, and clothing in old outfits
+  that no other file points to. The tool skips those parts, tells you, and refits the rest.
 - **Safety check**: before writing a file, the tool checks every mesh in it. If anything is broken, it
   writes nothing and tells you, instead of giving you a file that could crash the game.
 - **Files starting with `!!!`** replace the outfit's meshes. They load before most mods. If another mod

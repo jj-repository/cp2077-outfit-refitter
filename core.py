@@ -25,7 +25,7 @@ if (
     except OSError:
         DATA = _OLD_DATA
 
-VERSION = "1.2"
+VERSION = "1.3"
 
 
 def documents_dir():
@@ -467,7 +467,7 @@ def find_7z():
 
 
 VARIANT_BODY = re.compile(
-    r"(^|[^a-z])(ebb|ebbp|ebbrb|ebbprb|rb|evb|angel|eve|lush|solo|spawn0|songbird|gymfiend|"
+    r"(^|[^a-z])(ebb|ebbp|ebbrb|ebbprb|ebrb|rb|evb|angel|eve|lush|solo|spawn0|songbird|gymfiend|"
     r"vtk|flat|big ?boobs|small ?boobs|freyja|elegy)([^a-z]|$)",
     re.I,
 )
@@ -492,6 +492,7 @@ def prepare_input(path, dest, log):
         root = path
     elif low.endswith(".archive"):
         shutil.copy(path, dest)
+        variant_warning([shown_name(path)], log)
         return [os.path.join(dest, os.path.basename(path))]
     elif low.endswith(".zip"):
         zipfile.ZipFile(path).extractall(dest)
@@ -512,7 +513,22 @@ def prepare_input(path, dest, log):
     arcs = sorted(glob.glob(os.path.join(root, "**", "*.archive"), recursive=True))
     if not arcs:
         raise ToolError("No .archive file found in %s." % os.path.basename(path))
-    return choose_archives(arcs, root, log)
+    chosen = choose_archives(arcs, root, log)
+    if len(chosen) == len(arcs):  # the download has no other version to pick instead
+        variant_warning([shown_name(path)] + [os.path.relpath(a, root) for a in chosen], log)
+    return chosen
+
+
+def variant_warning(texts, log):
+    """Warn (never block) when the outfit's name or folders say it was made for another body."""
+    if any("vanilla" in t.lower() for t in texts):
+        return
+    m = next(filter(None, (VARIANT_BODY.search(t) for t in texts)), None)
+    if m:
+        log(
+            "This looks like a version made for another body (%s). Refits work best from the outfit's normal "
+            "(vanilla) version — download that one if the outfit has it." % m.group(2)
+        )
 
 
 def choose_archives(arcs, root, log):

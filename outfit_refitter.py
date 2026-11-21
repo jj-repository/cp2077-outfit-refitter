@@ -31,9 +31,6 @@ def cli_refit(a):
         print,
         do_install="--install" in a,
     )
-    for r in res:
-        if r[3]:
-            print(core.MISSING_TEXT % core.shown_name(r[0]))
     return 0 if all(r[1] or r[2] == "nothing to refit" for r in res) else 1
 
 

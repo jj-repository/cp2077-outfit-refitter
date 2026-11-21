@@ -7,7 +7,8 @@ with refits you trust (e.g. ones made by hand).
 
 --home: data folder to use instead of %LOCALAPPDATA%\OutfitRefitter (fresh folder = real first run).
 --gui: also open the window for two seconds and close it (proves it starts).
---gui-drop TAG=OUTFIT: open the real window, drop OUTFIT on it like Explorer does, press Refit, check the result.
+--gui-drop TAG=OUTFIT[=TEXT;TEXT]: open the real window, drop OUTFIT on it like Explorer does, press Refit, check the
+    result (+ safety check; each TEXT must show up in the window log).
 --gui-install DIR --gui-install-outfit OUTFIT=>REL;REL ...: 'Install into the game' tests in the real window on a fake
     game folder made in DIR (original missing / already there / Install unticked / Uninstall / closing the window).
     REL: the original outfit's files expected in the game, relative to the game folder. --no-wait: don't wait for
@@ -114,6 +115,50 @@ def check_variants(core):
             ]
         )
         assert got == want, got
+        msgs = []
+        core.prepare_input(t, t, msgs.append)
+        assert not any("made for another body" in m for m in msgs), (
+            msgs
+        )  # had a vanilla version: no warning
+        for name, warn in (
+            ("Quiet Outfit_Hyst EBRB Refit-5194.zip", "(EBRB)"),
+            ("Dress VTK Small.archive", "(VTK)"),
+            ("Quiet Outfit and Hair-5194-1-0.zip", None),
+        ):
+            msgs = []
+            core.variant_warning([name, r"archive\pc\mod\x.archive"], msgs.append)
+            assert (warn in msgs[0]) if warn else not msgs, (name, msgs)
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+
+def check_recover_names(rdar, refit):
+    """Archives without a name list: <hash>.bin files get their names back from paths mentioned in other files,
+    and a name pointing outside the folder is never used."""
+    t = tempfile.mkdtemp(prefix="bodyrefit_names_")
+    try:
+        src = os.path.join(t, "src")
+        os.makedirs(os.path.join(t, "archive", "pc", "mod"))
+        os.makedirs(os.path.join(t, "r6", "tweaks"))
+        os.makedirs(src)
+        arc = os.path.join(t, "archive", "pc", "mod", "a.archive")
+        for n, body in (
+            (r"my\shirt.mesh", b"x"),
+            (r"my\shirt.ent", b"CR2W..*my/shirt.mesh.."),
+            (r"my\shirt.app", b"x"),
+            (r"..\..\evil.mesh", b"x"),
+            (r"my\unknown.xbm", b"x"),
+        ):
+            open(os.path.join(src, "%d.bin" % rdar.fnv(n)), "wb").write(body)
+        with open(os.path.join(t, "r6", "tweaks", "a.yaml"), "w") as f:
+            f.write("entityName: my\\shirt.ent\n")
+        with open(arc[:-8] + ".xl", "w") as f:
+            f.write("x: my/shirt.app ..\\..\\evil.mesh\n")
+        found, left = refit.recover_names(src, [arc])
+        assert (found, left) == (3, 2), (found, left)
+        for n in (r"my\shirt.mesh", r"my\shirt.ent", r"my\shirt.app"):
+            assert os.path.isfile(os.path.join(src, n)), n
+        assert not os.path.exists(os.path.join(t, "evil.mesh"))
     finally:
         shutil.rmtree(t, ignore_errors=True)
 
@@ -846,6 +891,12 @@ def main(a):
         log("FAIL download-variant selection: %s" % e)
         fails.append("variants")
     try:
+        check_recover_names(rdar, __import__("refit"))
+        log("names for archives without a name list OK")
+    except AssertionError as e:
+        log("FAIL names for archives without a name list: %s" % e)
+        fails.append("recover names")
+    try:
         check_original_plan(core)
         log("original-outfit install plan OK")
     except AssertionError as e:
@@ -938,17 +989,38 @@ def main(a):
             log("FAIL: window did not start: %r" % e)
             fails.append("gui")
     for v in [x for i, x in enumerate(a) if i and a[i - 1] == "--gui-drop"]:
-        tag, _, outfit = v.partition("=")
+        tag, outfit, *expect = v.split("=")
         log("\nGUI drag-and-drop test: %s -> %s" % (os.path.basename(outfit), tag))
         try:
-            import gui
+            import gui, refit
 
             out = tempfile.mkdtemp(prefix="rf_guidrop_")
-            if gui.drive(outfit, tag, out, log, game=game)["ok"] and any(
-                f.lower().endswith(".archive") for f in os.listdir(out)
-            ):
-                log("  OK: window refit produced %s" % os.listdir(out))
+            st = gui.drive(outfit, tag, out, log, game=game, body_file=barch.get(tag))
+            for m in st["log"]:
+                log("    | " + m)
+            arcs = [f for f in os.listdir(out) if f.lower().endswith(".archive")]
+            missing = [
+                e
+                for e in ";".join(expect).split(";")
+                if e and not any(e in m for m in st["log"])
+            ]
+            bad = []
+            for f in arcs:
+                r = rdar.Rdar(os.path.join(out, f))
+                bad += refit.buffer_gate(os.path.join(out, f), {})
+                log(
+                    "  %s: %d files, index CRC %s"
+                    % (f, len(r.names), "OK" if r.crc_ok else "BAD")
+                )
+                for n in r.names:
+                    log("    " + n)
+            if st["ok"] and arcs and not missing and not bad:
+                log("  OK: window refit produced %s, safety check OK" % arcs)
             else:
+                log(
+                    "  FAIL: ok=%s archives=%s missing log text=%s safety=%s"
+                    % (st["ok"], arcs, missing, bad)
+                )
                 fails.append("gui-drop " + tag)
         except Exception:
             log("FAIL: gui-drop crashed:\n" + traceback.format_exc())
