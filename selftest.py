@@ -7,9 +7,10 @@ with refits you trust (e.g. ones made by hand).
 
 --home: data folder to use instead of %LOCALAPPDATA%\BodyRefitter (fresh folder = real first run).
 --gui: also open the window for two seconds and close it (proves it starts).
+--gui-drop TAG=OUTFIT: open the real window, drop OUTFIT on it like Explorer does, press Refit, check the result.
 Exit code 0 = everything passed."""
 
-import glob, os, shutil, sys, tempfile
+import glob, os, shutil, sys, tempfile, traceback
 
 
 def opt_all(a, k):
@@ -202,5 +203,21 @@ def main(a):
         except Exception as e:
             log("FAIL: window did not start: %r" % e)
             fails.append("gui")
+    for v in [x for i, x in enumerate(a) if i and a[i - 1] == "--gui-drop"]:
+        tag, _, outfit = v.partition("=")
+        log("\nGUI drag-and-drop test: %s -> %s" % (os.path.basename(outfit), tag))
+        try:
+            import gui
+
+            out = tempfile.mkdtemp(prefix="rf_guidrop_")
+            if gui.drive(outfit, tag, out, log) and any(
+                f.lower().endswith(".archive") for f in os.listdir(out)
+            ):
+                log("  OK: window refit produced %s" % os.listdir(out))
+            else:
+                fails.append("gui-drop " + tag)
+        except Exception:
+            log("FAIL: gui-drop crashed:\n" + traceback.format_exc())
+            fails.append("gui-drop " + tag)
     log("\nSELFTEST %s" % ("PASSED" if not fails else "FAILED: %s" % fails))
     return 1 if fails else 0

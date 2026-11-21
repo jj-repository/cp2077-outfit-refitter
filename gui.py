@@ -60,9 +60,19 @@ def enable_drop(root, callback):
                     sh.DragQueryFileW(wp, i, b, n)
                     files.append(b.value)
                 sh.DragFinish(wp)
-                root.after(0, callback, files)
+                # Never call Tk from inside this Windows callback: Tcl runs it with the GIL
+                # released and any tkinter call here aborts the process (0xc0000409).
+                # Hand the files over and let a Tk timer pick them up.
+                pending.append(files)
                 return 0
             return u.CallWindowProcW(old, h, msg, wp, lp)
+
+        pending = []
+
+        def poll():
+            while pending:
+                callback(pending.pop(0))
+            root.after(150, poll)
 
         root._drop_proc = WNDPROC(
             proc
@@ -70,6 +80,7 @@ def enable_drop(root, callback):
         old = u.SetWindowLongPtrW(
             hwnd, -4, ctypes.cast(root._drop_proc, ctypes.c_void_p)
         )
+        poll()
         return True
     except Exception:
         return False
@@ -107,12 +118,16 @@ class App:
         )
         self.body_info = ttk.Label(f, text="", foreground="#555")
         self.body_info.grid(row=2, column=1, columnspan=2, sticky="w", padx=4)
-        ttk.Label(f, text="Output folder:").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(f, text="Output folder:").grid(
+            row=3, column=0, sticky="w", pady=(6, 0)
+        )
         self.out = tk.StringVar(value=self.s.get("out") or core.DEFAULT_OUT)
         ttk.Entry(f, textvariable=self.out, state="readonly").grid(
             row=3, column=1, sticky="ew", padx=4, pady=(6, 0)
         )
-        ttk.Button(f, text="Change...", command=self.pick_out).grid(row=3, column=2, pady=(6, 0))
+        ttk.Button(f, text="Change...", command=self.pick_out).grid(
+            row=3, column=2, pady=(6, 0)
+        )
         f.columnconfigure(1, weight=1)
 
         box = ttk.LabelFrame(
@@ -225,7 +240,9 @@ class App:
             self.show_body()
 
     def pick_out(self):
-        d = filedialog.askdirectory(title="Choose where to save the refits", initialdir=self.out_dir())
+        d = filedialog.askdirectory(
+            title="Choose where to save the refits", initialdir=self.out_dir()
+        )
         if d:
             self.out.set(os.path.normpath(d))
             self.s["out"] = self.out.get()
@@ -332,10 +349,12 @@ class App:
             self.body_file(),
             self.s.pop("wk_existing", None),
         )
-        threading.Thread(target=self.work, args=args, daemon=True).start()
+        # the worker gets only the queue, never the window objects (Tk is not thread-safe)
+        threading.Thread(target=App.work, args=(self.q,) + args, daemon=True).start()
 
-    def work(self, files, tag, game, out, inst, body_file, wk_existing):
-        put = lambda m: self.q.put(("log", m))
+    @staticmethod
+    def work(q, files, tag, game, out, inst, body_file, wk_existing):
+        put = lambda m: q.put(("log", m))
         try:
             res = core.run_batch(
                 files,
@@ -343,7 +362,7 @@ class App:
                 game,
                 out,
                 put,
-                lambda f: self.q.put(("prog", f)),
+                lambda f: q.put(("prog", f)),
                 inst,
                 body_file,
                 wk_existing,
@@ -363,13 +382,13 @@ class App:
                     "Refits are for your own game only. Please don't upload refits of other people's outfits "
                     "without the outfit author's permission."
                 )
-            self.q.put(("done", None))
+            q.put(("done", None))
         except core.ToolError as e:
             put("Stopped: %s" % e)
-            self.q.put(("error", str(e)))
+            q.put(("error", str(e)))
         except Exception:
             put("Unexpected error:\n" + traceback.format_exc())
-            self.q.put(("error", "Unexpected error, see the log."))
+            q.put(("error", "Unexpected error, see the log."))
 
     def poll(self):
         try:
@@ -399,9 +418,88 @@ class App:
         self.root.after(100, self.poll)
 
 
+def post_drop(root, paths):
+    """Self-test helper: send a real WM_DROPFILES to the window, exactly what Explorer sends."""
+    import ctypes
+    from ctypes import wintypes
+
+    k, u = ctypes.windll.kernel32, ctypes.windll.user32
+    k.GlobalAlloc.restype = ctypes.c_void_p
+    k.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    k.GlobalLock.restype = ctypes.c_void_p
+    k.GlobalLock.argtypes = [ctypes.c_void_p]
+    k.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    u.PostMessageW.argtypes = [
+        wintypes.HWND,
+        wintypes.UINT,
+        wintypes.WPARAM,
+        wintypes.LPARAM,
+    ]
+    data = ("\0".join(paths) + "\0\0").encode("utf-16-le")
+    h = k.GlobalAlloc(0x42, 20 + len(data))  # DROPFILES header + wide file list
+    p = k.GlobalLock(h)
+    ctypes.memmove(p, (ctypes.c_uint32 * 5)(20, 0, 0, 0, 1), 20)
+    ctypes.memmove(p + 20, data, len(data))
+    k.GlobalUnlock(h)
+    u.PostMessageW(int(root.wm_frame(), 16), 0x233, h, 0)
+
+
+def drive(outfit, tag, out, log, timeout_s=900):
+    """Self-test: open the real window, drop an outfit on it, pick the body, press Refit,
+    wait for the result. Returns True when the refit finished without error."""
+    import gc, time
+
+    gc.collect()  # drop Tk objects of an earlier window while we are still on the main thread
+    root = tk.Tk()
+    app = App(root, [])
+    errors = []
+    messagebox.showerror = lambda title, msg, **kw: errors.append(
+        msg
+    )  # no modal dialogs in a test
+    messagebox.showinfo = lambda title, msg, **kw: errors.append(msg)
+    app.out.set(out)
+    app.inst.set(False)
+    app.body.set(core.body_name(tag))
+    t0 = time.time()
+    state = {"step": "drop", "ok": False}
+
+    def tick():
+        if state["step"] == "drop":
+            post_drop(root, [outfit])
+            state["step"] = "wait_list"
+        elif state["step"] == "wait_list":
+            if app.lst.size():
+                log("  drop arrived in the list: %s" % app.lst.get(0))
+                app.start()
+                state["step"] = "wait_done"
+            elif time.time() - t0 > 10:
+                log("  FAIL: dropped file never showed up in the list")
+                root.destroy()
+                return
+        elif state["step"] == "wait_done":
+            if not app.busy:
+                state["ok"] = not errors
+                if errors:
+                    log("  FAIL: %s" % errors)
+                root.after(300, root.destroy)
+                return
+            if time.time() - t0 > timeout_s:
+                log("  FAIL: refit did not finish in time")
+                root.destroy()
+                return
+        root.after(200, tick)
+
+    root.after(500, tick)
+    root.mainloop()
+    del app, root
+    gc.collect()
+    return state["ok"]
+
+
 def main(files=(), close_after_ms=None):
     try:  # sharp text on high-DPI screens
         import ctypes
+
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         pass
@@ -414,3 +512,7 @@ def main(files=(), close_after_ms=None):
     if close_after_ms:  # used by the self-test to prove the window starts
         root.after(close_after_ms, root.destroy)
     root.mainloop()
+    del root
+    import gc
+
+    gc.collect()  # free Tk objects here on the main thread, not later in a worker thread
