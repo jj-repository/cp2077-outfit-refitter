@@ -2,7 +2,7 @@ r"""Everything around the refit itself: settings, finding the game, getting Wolv
 from the user's own installed files, unpacking outfit downloads, installing/uninstalling refits.
 No widgets here: the GUI and the --selftest both call run_batch()."""
 
-import fnmatch, glob, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time, urllib.request, zipfile
+import filecmp, fnmatch, glob, hashlib, json, os, re, shutil, subprocess, sys, tempfile, threading, time, urllib.request, zipfile
 
 import rdar
 
@@ -12,14 +12,20 @@ APP_DIR = getattr(
 DATA = os.environ.get("BODYREFIT_HOME") or os.path.join(
     os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "OutfitRefitter"
 )
-_OLD_DATA = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "BodyRefitter")
-if not os.environ.get("BODYREFIT_HOME") and not os.path.exists(DATA) and os.path.isdir(_OLD_DATA):
+_OLD_DATA = os.path.join(
+    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "BodyRefitter"
+)
+if (
+    not os.environ.get("BODYREFIT_HOME")
+    and not os.path.exists(DATA)
+    and os.path.isdir(_OLD_DATA)
+):
     try:  # the tool was called Body Refitter in 1.0: move its data folder over once
         os.rename(_OLD_DATA, DATA)
     except OSError:
         DATA = _OLD_DATA
 
-VERSION = "1.0"
+VERSION = "1.1"
 
 
 def documents_dir():
@@ -33,7 +39,12 @@ def documents_dir():
         guid = (ctypes.c_byte * 16).from_buffer_copy(fid.bytes_le)
         p = ctypes.c_wchar_p()
         sh = ctypes.windll.shell32
-        sh.SHGetKnownFolderPath.argtypes = [ctypes.c_void_p, wintypes.DWORD, wintypes.HANDLE, ctypes.POINTER(ctypes.c_wchar_p)]
+        sh.SHGetKnownFolderPath.argtypes = [
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+            ctypes.POINTER(ctypes.c_wchar_p),
+        ]
         if sh.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(p)) == 0:
             d = p.value
             ctypes.windll.ole32.CoTaskMemFree(p)
@@ -41,10 +52,14 @@ def documents_dir():
                 return d
     except Exception:
         pass
-    d = os.path.join(os.environ.get("USERPROFILE") or os.path.expanduser("~"), "Documents")
+    d = os.path.join(
+        os.environ.get("USERPROFILE") or os.path.expanduser("~"), "Documents"
+    )
     if os.path.isdir(d):
         return d
-    return os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
+    return os.path.dirname(
+        sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__)
+    )
 
 
 DEFAULT_OUT = os.path.join(documents_dir(), "Outfit Refitter")
@@ -178,26 +193,39 @@ def run(args, game=None, ok=None):
     env = dict(os.environ)
     if game:
         env["CP77_DIR"] = game
-    r = subprocess.run(
+    p = subprocess.Popen(
         [str(a) for a in args],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         errors="replace",
         env=env,
         creationflags=_FLAGS,
         stdin=subprocess.DEVNULL,
     )
-    if r.returncode and not (ok and ok in r.stdout):
+    _RUNNING.add(p)
+    try:
+        out, err = p.communicate()
+    finally:
+        _RUNNING.discard(p)
+    if p.returncode and not (ok and ok in out):
         raise RuntimeError(
             "%s %s failed:\n%s%s"
-            % (
-                os.path.basename(str(args[0])),
-                args[1],
-                r.stdout[-1500:],
-                r.stderr[-1500:],
-            )
+            % (os.path.basename(str(args[0])), args[1], out[-1500:], err[-1500:])
         )
-    return r.stdout
+    return out
+
+
+_RUNNING = set()  # tools started by run() that are still working
+
+
+def stop_tools():
+    """Stop running WolvenKit / 7-Zip processes (the window is closing); the refit they belong to then fails."""
+    for p in list(_RUNNING):
+        try:
+            p.kill()
+        except OSError:
+            pass
 
 
 # ---------------- WolvenKit ----------------
@@ -414,6 +442,17 @@ def _work_root():
     return d
 
 
+def clean_old_work():
+    """Remove temporary folders left behind when the tool was closed during a refit (older than 12 hours,
+    so a second running copy of the tool keeps its own)."""
+    for p in glob.glob(os.path.join(_work_root(), "*_*")):
+        try:
+            if time.time() - os.path.getmtime(p) > 12 * 3600:
+                shutil.rmtree(p, ignore_errors=True)
+        except OSError:
+            pass
+
+
 def find_7z():
     for p in (
         shutil.which("7z"),
@@ -432,10 +471,14 @@ VARIANT_BODY = re.compile(
 )
 
 
-def outfit_name(path):
+def shown_name(path):
+    """The outfit's name as the user sees it: the download's name without .zip / .7z / .rar / .archive."""
     n = os.path.basename(os.path.normpath(path))
-    n = re.sub(r"\.(zip|7z|rar|archive)$", "", n, flags=re.I)
-    return re.sub(r"\W+", "_", n).strip("_")[:60] or "outfit"
+    return re.sub(r"\.(zip|7z|rar|archive)$", "", n, flags=re.I)
+
+
+def outfit_name(path):
+    return re.sub(r"\W+", "_", shown_name(path)).strip("_")[:60] or "outfit"
 
 
 def prepare_input(path, dest, log):
@@ -476,9 +519,12 @@ def prepare_input(path, dest, log):
             chosen.append(same[0])
             continue
         rel = lambda a: os.path.relpath(a, root)
+        folder = lambda a: os.path.dirname(
+            rel(a)
+        )  # same file name: only the folder tells the versions apart
         van = (
-            [a for a in same if re.search("vanilla", rel(a), re.I)]
-            or [a for a in same if not VARIANT_BODY.search(rel(a))]
+            [a for a in same if re.search("vanilla", folder(a), re.I)]
+            or [a for a in same if not VARIANT_BODY.search(folder(a))]
             or same
         )
         chosen.append(van[0])
@@ -509,6 +555,14 @@ def prepare_input(path, dest, log):
 
 # ---------------- install / uninstall ----------------
 
+# Held while files are copied into the game. The window takes it before closing, so closing never cuts a copy in half.
+INSTALL_LOCK = threading.Lock()
+GAME_TOP = (
+    "r6",
+    "red4ext",
+    "bin",
+)  # folders of a download that go to the same place in the game folder
+
 
 def _installed_path():
     return os.path.join(DATA, "installed.json")
@@ -521,43 +575,170 @@ def installed():
         return []
 
 
-def install(files, game, log):
+def _save_installed(lst):
+    os.makedirs(DATA, exist_ok=True)
+    tmp = _installed_path() + ".part"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(lst, f, indent=1)
+    os.replace(tmp, _installed_path())
+
+
+def _copy(src, dst):
+    """Copy under a temporary name, then rename: a file in the game is either complete or not there."""
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copy2(src, dst + ".part")
+    os.replace(dst + ".part", dst)
+
+
+def _inside(path, folder):
+    a, b = (os.path.normcase(os.path.abspath(x)) for x in (path, folder))
+    return a != b and os.path.commonpath([a, b]) == b
+
+
+def _entry(dst, game, kind, outfit):
+    return {
+        "file": os.path.basename(dst),
+        "folder": os.path.dirname(dst),
+        "rel": os.path.relpath(dst, game),
+        "kind": kind,
+        "outfit": outfit,
+        "date": time.strftime("%Y-%m-%d %H:%M"),
+    }
+
+
+def _key(e):
+    return os.path.normcase(os.path.join(e["folder"], e["file"]))
+
+
+def install(files, game, log, outfit=""):
+    r"""Copy refits into archive\pc\mod and add them to the uninstall list."""
     lst = installed()
-    mine = {e["file"].lower() for e in lst}
-    md = mod_dir(game)
+    mine = {_key(e) for e in lst}
     for f in files:
-        dst = os.path.join(md, os.path.basename(f))
-        if os.path.exists(dst) and os.path.basename(f).lower() not in mine:
+        dst = os.path.join(mod_dir(game), os.path.basename(f))
+        k = os.path.normcase(dst)
+        if os.path.exists(dst) and k not in mine:
             log(
                 "Not installed: %s already exists in the game and was not made by this tool."
                 % os.path.basename(f)
             )
             continue
-        shutil.copy2(f, dst)
-        if os.path.basename(f).lower() not in mine:
-            lst.append(
-                {
-                    "file": os.path.basename(f),
-                    "folder": md,
-                    "date": time.strftime("%Y-%m-%d %H:%M"),
-                }
-            )
+        _copy(f, dst)
+        if k not in mine:
+            lst.append(_entry(dst, game, "refit", outfit))
+            mine.add(k)
+        _save_installed(lst)
         log("Installed into the game: %s" % os.path.basename(f))
-    json.dump(lst, open(_installed_path(), "w", encoding="utf-8"), indent=1)
 
 
-def uninstall(names, log):
+def archives_in_game(game):
+    r"""Lower-case names of every .archive under archive\pc\mod, subfolders included (Vortex / MO2 installs)."""
+    names = set()
+    for dp, _, fs in os.walk(mod_dir(game)):
+        names.update(f.lower() for f in fs if f.lower().endswith(".archive"))
+    return names
+
+
+def original_missing(arcs, game):
+    """True when one of the outfit's .archive files is nowhere in the game's mod folder."""
+    have = archives_in_game(game)
+    return any(os.path.basename(a).lower() not in have for a in arcs)
+
+
+def original_plan(root, arcs):
+    r"""How to install the original outfit: -> [(source file, path relative to the game folder)].
+    arcs: the .archive files prepare_input picked (the vanilla version), under root. Files already under
+    archive\pc\mod\... keep that path; a loose .archive and the .xl files next to it go to archive\pc\mod;
+    r6, red4ext and bin folders beside them keep their path."""
+    every = glob.glob(os.path.join(root, "**", "*.archive"), recursive=True)
+    picked = {os.path.normcase(a) for a in arcs}
+    mixed = {
+        os.path.normcase(os.path.dirname(a))
+        for a in every
+        if os.path.normcase(a) not in picked
+    }
+    plan, roots = {}, set()
+    for a in arcs:
+        parts = os.path.relpath(a, root).split(os.sep)
+        low = [p.lower() for p in parts]
+        i = next(
+            (
+                k
+                for k in range(len(low) - 3)
+                if low[k : k + 3] == ["archive", "pc", "mod"]
+            ),
+            None,
+        )
+        if i is None:  # loose in the download
+            dest, groot = os.path.join("archive", "pc", "mod"), os.path.dirname(a)
+        else:
+            dest, groot = os.path.join(*parts[i:-1]), os.path.join(root, *parts[:i])
+        roots.add(groot)
+        d = os.path.dirname(a)
+        for f in os.listdir(d):
+            p, fl = os.path.join(d, f), f.lower()
+            other_body = (  # e.g. outfit_ebb.xl beside outfit_vanilla.xl
+                os.path.normcase(d) in mixed
+                and VARIANT_BODY.search(f)
+                and "vanilla" not in fl
+            )
+            if os.path.normcase(p) == os.path.normcase(a) or (
+                fl.endswith(".xl") and os.path.isfile(p) and not other_body
+            ):
+                plan[os.path.normcase(os.path.join(dest, f))] = (
+                    p,
+                    os.path.join(dest, f),
+                )
+    for g in roots:
+        for top in os.listdir(g):
+            if top.lower() in GAME_TOP and os.path.isdir(os.path.join(g, top)):
+                for dp, _, fs in os.walk(os.path.join(g, top)):
+                    for f in fs:
+                        rel = os.path.relpath(os.path.join(dp, f), g)
+                        plan[os.path.normcase(rel)] = (os.path.join(dp, f), rel)
+    return sorted(plan.values(), key=lambda x: x[1].lower())
+
+
+def install_original(plan, game, log, outfit=""):
+    """Copy the original outfit into the game and add it to the uninstall list. Skips archives that are already
+    somewhere in the mod folder and never overwrites a different file. -> number of files copied."""
+    have = archives_in_game(game)
     lst = installed()
+    n = 0
+    for src, rel in plan:
+        dst = os.path.normpath(os.path.join(game, rel))
+        if not _inside(dst, game):
+            log("Not copied: %s would land outside the game folder." % rel)
+            continue
+        if rel.lower().endswith(".archive") and os.path.basename(rel).lower() in have:
+            continue
+        if os.path.exists(dst):
+            if not filecmp.cmp(src, dst, shallow=False):
+                log(
+                    "Not copied: %s is already in the game and is different. Kept the one in the game."
+                    % rel
+                )
+            continue
+        _copy(src, dst)
+        lst.append(_entry(dst, game, "original", outfit))
+        _save_installed(lst)
+        n += 1
+    return n
+
+
+def uninstall(entries, log):
+    """Remove the given install-list entries (refits, or originals this tool installed) from the game."""
+    gone = {_key(e) for e in entries}
     keep = []
-    for e in lst:
-        if e["file"] in names:
+    for e in installed():
+        if _key(e) in gone:
             p = os.path.join(e["folder"], e["file"])
             if os.path.exists(p):
                 os.remove(p)
-            log("Removed from the game: %s" % e["file"])
+            log("Removed from the game: %s" % e.get("rel", e["file"]))
         else:
             keep.append(e)
-    json.dump(keep, open(_installed_path(), "w", encoding="utf-8"), indent=1)
+    _save_installed(keep)
 
 
 # ---------------- the whole job ----------------
@@ -586,6 +767,9 @@ def setup(game, tag, log, progress=lambda f: None, body_archive=None, wk_existin
     return wk, cages
 
 
+MISSING_TEXT = "The original outfit '%s' is not in your game yet. Install it too — the refit only works together with it."
+
+
 def run_batch(
     inputs,
     tag,
@@ -596,15 +780,23 @@ def run_batch(
     do_install=False,
     body_archive=None,
     wk_existing=None,
+    cancel=None,
 ):
-    """Refit every input for body tag. -> list of (input, output archive or None, message)."""
+    """Refit every input for body tag. -> list of (input, output archive or None, message, original missing).
+    original missing: True when the original outfit is not in the game (and was not installed now).
+    cancel: a threading.Event; once set, nothing more is installed and no further outfit is started."""
     import refit
 
+    cancel = cancel or threading.Event()
+    clean_old_work()
     wk, cages = setup(game, tag, log, progress, body_archive, wk_existing)
     os.makedirs(out_dir, exist_ok=True)
     results = []
     for i, inp in enumerate(inputs):
+        if cancel.is_set():
+            break
         name = outfit_name(inp)
+        shown = shown_name(inp)
         log("")
         log("=== %s ===" % os.path.basename(inp))
         work = tempfile.mkdtemp(prefix="job_", dir=_work_root())
@@ -622,17 +814,42 @@ def run_batch(
                 log,
                 lambda f: progress((i + f) / len(inputs)),
             )
+            missing = bool(res) and original_missing(arcs, game)
             if res and do_install:
-                install([res], game, log)
-            results.append((inp, res, "ok" if res else "nothing to refit"))
+                with INSTALL_LOCK:
+                    if cancel.is_set():
+                        log("Stopped before installing (the window was closed).")
+                        break
+                    install([res], game, log, shown)
+                    if missing:
+                        root = inp if os.path.isdir(inp) else os.path.join(work, "in")
+                        n = install_original(
+                            original_plan(root, arcs), game, log, shown
+                        )
+                        missing = original_missing(arcs, game)
+                        if n and not missing:
+                            log(
+                                "Original outfit was not installed — installed it now (%d files)"
+                                % n
+                            )
+                        else:
+                            log(
+                                "The original outfit could not be installed completely (see above). "
+                                "Please install it yourself."
+                            )
+                    else:
+                        log("Original outfit already installed — kept as is")
+            elif missing:
+                log(MISSING_TEXT % shown)
+            results.append((inp, res, "ok" if res else "nothing to refit", missing))
         except ToolError as e:
             log("Could not refit this outfit: %s" % e)
-            results.append((inp, None, str(e)))
+            results.append((inp, None, str(e), False))
         except (
             Exception
         ) as e:  # keep going with the next outfit; full detail goes to the log
             log("Could not refit this outfit (unexpected error): %r" % e)
-            results.append((inp, None, repr(e)))
+            results.append((inp, None, repr(e), False))
         finally:
             if not os.environ.get("BODYREFIT_KEEP_WORK"):
                 shutil.rmtree(work, ignore_errors=True)

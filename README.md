@@ -37,8 +37,8 @@ Many outfits never get one.
 ## What does this tool do?
 
 You give it a clothing mod made for the normal body. It gives you back a small extra file that
-reshapes that clothing to your body mod. You put that file in your game next to the original
-outfit. That's it.
+reshapes that clothing to your body mod. That file goes into your game next to the original
+outfit. If you let it, the tool puts both into your game for you. That's it.
 
 - The original outfit is not changed. Delete the extra file and everything is back to normal.
 - It works on the download as it comes: a zip, 7z or rar, an unpacked folder, or a single .archive file.
@@ -59,7 +59,7 @@ need a hand-made refit. Always look at the result in game.
 
 ## How to use it
 
-1. Install your body mod and the clothing mod as usual.
+1. Install your body mod as usual. The clothing mod too, or let the tool install it (step 5).
 2. Unzip Outfit Refitter anywhere (for example on your Desktop) and start **OutfitRefitter.exe**.
 3. Check the top of the window:
    - **Game folder** is found automatically. If not, click **Change...** and pick your Cyberpunk 2077 folder.
@@ -69,7 +69,9 @@ need a hand-made refit. Always look at the result in game.
 4. Drag the clothing mod's download (zip / 7z / rar / folder / .archive) into the window,
    or click **Add outfit...**. You can add several. Use the outfit's **vanilla body** version.
 5. Tick **Install into the game when done** if you want the tool to copy the result into your game.
-   It is off at first, so nothing goes into your game unless you ask for it.
+   It also checks whether the original outfit is in your game. If it is not, the tool installs it too,
+   from the same download. An original that is already installed is left as it is.
+   The tick is off at first, so nothing goes into your game unless you ask for it.
 6. Click **Refit**.
    - The **first time** it downloads WolvenKit (about 45 MB) and reads the body shapes from your game.
      This takes a minute or two and only happens once.
@@ -80,16 +82,25 @@ The results are saved in `Documents\Outfit Refitter` (or the folder you picked).
 They are named like `AngelRefit_<outfit>.archive` or `!!!AngelRefit_<outfit>.archive`.
 
 If you did not let the tool install them: copy the files into `<game folder>\archive\pc\mod`.
+The original outfit must be in your game as well. If it is missing, the log says so.
 
 ## Removing refits
 
-Click **Uninstall refits...**, select the ones you want to remove, and click **Remove selected**.
+Click **Uninstall...**. The list shows everything the tool put into your game:
+**Refit** (the reshaped file) and **Original outfit** (outfits it installed because they were missing).
+Select what you want to remove and click **Remove selected**.
 The tool only removes files it installed itself.
 
 ## Good to know
 
 - **Use the version of the outfit made for the normal (vanilla) body.** If you give it an outfit that was
   already made for Angel or EVE, it reshapes it a second time and it won't fit.
+- **The refit needs the original outfit.** It only reshapes the original, so both must be in the game.
+  With Install ticked, the tool looks for the original's `.archive` file(s) anywhere in `archive\pc\mod`
+  (also in subfolders, where Vortex or MO2 may put them). If they are missing, it installs the original from
+  your download: files that are already in an `archive\pc\mod`, `r6`, `red4ext` or `bin` folder keep that
+  place, a loose `.archive` / `.xl` goes to `archive\pc\mod`. It never replaces a different file that is
+  already there; the log says so instead. Without Install, the tool only tells you when the original is missing.
 - **Some parts are skipped on purpose**, and the log says why: glasses, hats and other things that don't
   touch the body, male meshes, versions for other bodies (EBB, RB, ...), and parts the mod already ships
   an Angel/EVE version of.
@@ -212,7 +223,9 @@ python outfit_refitter.py --selftest --home <empty folder> --out <folder>
 It checks the download-variant selection, detects the game, downloads and checks WolvenKit into `--home`
 (a real first run), extracts the body shapes, refits each `--case`, runs the safety check, lists the
 output archive and, if a reference refit is given, prints the vertex distance per mesh. `--gui` also opens
-the window for two seconds. Exit code 0 = passed. In the windowed `.exe`, the text goes to
+the window for two seconds. `--gui-install <folder> --gui-install-outfit <outfit>=><expected file>;...` runs the
+Install tests in the real window on a fake game folder it makes in `<folder>` (original missing, original already
+there, Install unticked, Uninstall, closing the window mid-refit); the real game folder is only read. Exit code 0 = passed. In the windowed `.exe`, the text goes to
 `%TEMP%\OutfitRefitter_console.log`.
 
 ### Adding a body
@@ -224,5 +237,5 @@ bodies to be used this way.**
 
 ### Data folder
 
-`%LOCALAPPDATA%\OutfitRefitter\`: `settings.json` (game folder, body, output folder, install tick), `installed.json` (the uninstall list), `wolvenkit\`,
+`%LOCALAPPDATA%\OutfitRefitter\`: `settings.json` (game folder, body, output folder, install tick), `installed.json` (the uninstall list: refits and original outfits the tool installed), `wolvenkit\`,
 `cages\`, `work\` (temporary), `last_log.txt`. Delete the folder to reset the tool.

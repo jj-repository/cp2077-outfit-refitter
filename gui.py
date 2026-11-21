@@ -98,16 +98,17 @@ Steps, in order
 
 4. Add the outfit: drag its download (zip / 7z / rar), its unpacked folder or its .archive file into the big list. Or use 'Add outfit...' / 'Add folder...'. Use the outfit's VANILLA-body version. You can add several outfits at once.
 
-5. Install: tick 'Install into the game when done' if the tool should put the refit straight into your game. Leave it unticked to only save the file in the output folder.
+5. Install: tick 'Install into the game when done' if the tool should put the refit straight into your game. If the original outfit is not in your game yet, the tool installs it too, from the same download. Leave it unticked to only save the file in the output folder; then nothing goes into your game.
 
 6. Click 'Refit'. The bar and the log below show the progress. The first run takes longer: the tool downloads WolvenKit (about 45 MB) and reads the body shape from your game once.
 
-7. Done. If you didn't tick Install, click 'Open output folder' and copy the .archive file(s) into <game folder>\\archive\\pc\\mod. Keep the original outfit installed as well; the refit only reshapes it.
+7. Done. If you didn't tick Install, click 'Open output folder' and copy the .archive file(s) into <game folder>\\archive\\pc\\mod. The original outfit must be in your game as well; the refit only reshapes it. The log tells you if it is missing.
 
 Undo
-'Uninstall refits...' removes refits this tool installed. Or delete the AngelRefit_/EveRefit_ file from archive\\pc\\mod.
+'Uninstall...' lists what this tool put into your game: refits, and original outfits it installed because they were missing. Select what to remove. Or delete the AngelRefit_/EveRefit_ file from archive\\pc\\mod yourself.
 
 Good to know
+- The refit only works together with the original outfit. With Install ticked, the tool checks your game and installs the original if it is missing. An original that is already installed is left as it is.
 - Refits are for your own game. Don't upload refits of other people's outfits without the outfit author's permission.
 - If something is skipped (for example glasses or props), the log says so; the rest of the outfit is still refit.
 - 'WolvenKit...' lets you use a WolvenKit you already have instead of downloading it.
@@ -117,6 +118,9 @@ Good to know
 class App:
     def __init__(self, root, files):
         self.root, self.q, self.busy = root, queue.Queue(), False
+        self.cancel, self.worker = threading.Event(), None
+        root.report_callback_exception = self.on_error
+        root.protocol("WM_DELETE_WINDOW", self.close)
         self.s = core.load_settings()
         self.tags = list(core.bodies()["bodies"])
         root.title("Outfit Refitter %s" % core.VERSION)
@@ -186,7 +190,7 @@ class App:
         ttk.Button(a, text="Open output folder", command=self.open_out).pack(
             side="left", padx=4
         )
-        ttk.Button(a, text="Uninstall refits...", command=self.uninstall).pack(
+        ttk.Button(a, text="Uninstall...", command=self.uninstall).pack(
             side="left"
         )
         ttk.Button(a, text="Help", command=self.show_help).pack(side="right")
@@ -347,22 +351,37 @@ class App:
     def uninstall(self):
         items = core.installed()
         if not items:
-            messagebox.showinfo("Outfit Refitter", "No refits installed by this tool.")
-            return
+            messagebox.showinfo(
+                "Outfit Refitter", "This tool has not put anything into your game."
+            )
+            return None
         w = tk.Toplevel(self.root)
-        w.title("Installed refits")
-        ttk.Label(w, text="Select refits to remove from the game:").pack(
-            anchor="w", padx=8, pady=4
-        )
-        lb = tk.Listbox(w, selectmode="extended", width=70, height=12)
+        w.title("Installed by Outfit Refitter")
+        ttk.Label(
+            w,
+            text="Select what to remove from the game.\n"
+            "Refit = the reshaped file this tool made.\n"
+            "Original outfit = the outfit itself; this tool installed it because it was missing.",
+            justify="left",
+        ).pack(anchor="w", padx=8, pady=4)
+        lb = tk.Listbox(w, selectmode="extended", width=90, height=12)
         for e in items:
-            lb.insert("end", "%s   (%s)" % (e["file"], e["date"]))
+            lb.insert(
+                "end",
+                "%s:  %s   (%s%s)"
+                % (
+                    "Original outfit" if e.get("kind") == "original" else "Refit",
+                    e.get("rel", e["file"]),
+                    e["outfit"] + ", " if e.get("outfit") else "",
+                    e["date"],
+                ),
+            )
         lb.pack(fill="both", expand=True, padx=8)
 
         def rm():
-            names = [items[i]["file"] for i in lb.curselection()]
-            if names:
-                core.uninstall(names, self.log)
+            sel = [items[i] for i in lb.curselection()]
+            if sel:
+                core.uninstall(sel, self.log)
             w.destroy()
 
         bf = ttk.Frame(w)
@@ -372,6 +391,31 @@ class App:
             side="left", padx=4
         )
         ttk.Button(bf, text="Close", command=w.destroy).pack(side="right")
+        w.lb, w.remove = lb, rm  # for the self-test
+        return w
+
+    def on_error(self, exc, val, tb):
+        """A bug in a button or timer: write it to the log and say so plainly instead of failing silently."""
+        try:
+            self.log("Unexpected error:\n" + "".join(traceback.format_exception(exc, val, tb)))
+            messagebox.showerror(
+                "Outfit Refitter",
+                "Something went wrong in the window. The details are in the log at the bottom.",
+            )
+        except Exception:
+            pass
+
+    def close(self):
+        """Window closed: stop the refit, but let a copy into the game finish first, so the game never keeps a
+        half-copied file (the uninstall list is saved after every file)."""
+        self.cancel.set()
+        core.stop_tools()
+        got = core.INSTALL_LOCK.acquire(timeout=120)
+        try:
+            self.root.destroy()
+        finally:
+            if got:
+                core.INSTALL_LOCK.release()
 
     def start(self):
         if self.busy:
@@ -384,6 +428,7 @@ class App:
         self.busy = True
         self.go["state"] = "disabled"
         self.prog["value"] = 0
+        self.cancel = threading.Event()
         args = (
             files,
             self.tag(),
@@ -392,12 +437,16 @@ class App:
             self.inst.get(),
             self.body_file(),
             self.s.pop("wk_existing", None),
+            self.cancel,
         )
-        # the worker gets only the queue, never the window objects (Tk is not thread-safe)
-        threading.Thread(target=App.work, args=(self.q,) + args, daemon=True).start()
+        # the worker gets only the queue and plain values, never the window objects (Tk is not thread-safe)
+        self.worker = threading.Thread(
+            target=App.work, args=(self.q,) + args, daemon=True
+        )
+        self.worker.start()
 
     @staticmethod
-    def work(q, files, tag, game, out, inst, body_file, wk_existing):
+    def work(q, files, tag, game, out, inst, body_file, wk_existing, cancel):
         put = lambda m: q.put(("log", m))
         try:
             res = core.run_batch(
@@ -410,6 +459,7 @@ class App:
                 inst,
                 body_file,
                 wk_existing,
+                cancel,
             )
             ok = [r for r in res if r[1]]
             put("")
@@ -421,6 +471,9 @@ class App:
                 put(
                     "To use them, copy the .archive files into <game>\\archive\\pc\\mod (or tick 'Install')."
                 )
+            for r in res:
+                if r[3]:
+                    put(core.MISSING_TEXT % core.shown_name(r[0]))
             if ok:
                 put(
                     "Refits are for your own game only. Please don't upload refits of other people's outfits "
@@ -488,24 +541,35 @@ def post_drop(root, paths):
     u.PostMessageW(int(root.wm_frame(), 16), 0x233, h, 0)
 
 
-def drive(outfit, tag, out, log, timeout_s=900):
-    """Self-test: open the real window, drop an outfit on it, pick the body, press Refit,
-    wait for the result. Returns True when the refit finished without error."""
-    import gc, time
+def drive(
+    outfit, tag, out, log, timeout_s=900, game=None, install=False, body_file=None, close_on=None
+):
+    """Self-test: open the real window, drop an outfit on it, pick the body (and game folder, body file, Install
+    tick), press Refit, wait for the result. close_on: text; when it shows up in the log, the window gets a real
+    WM_CLOSE (the user clicking X) in the middle of the refit.
+    -> {"ok": finished without error, "log": [window log lines], "worker": the refit thread}"""
+    import ctypes, gc, time
 
     gc.collect()  # drop Tk objects of an earlier window while we are still on the main thread
     root = tk.Tk()
     app = App(root, [])
-    errors = []
+    errors, lines = [], []
     messagebox.showerror = lambda title, msg, **kw: errors.append(
         msg
     )  # no modal dialogs in a test
     messagebox.showinfo = lambda title, msg, **kw: errors.append(msg)
+    show = app.log
+    app.log = lambda m: (lines.append(m), show(m))
+    if game:
+        app.game.set(game)
+    if body_file:
+        app.s.setdefault("body_archive", {})[tag] = body_file
     app.out.set(out)
-    app.inst.set(False)
+    app.inst.set(install)
     app.body.set(core.body_name(tag))
+    app.show_body()
     t0 = time.time()
-    state = {"step": "drop", "ok": False}
+    state = {"step": "drop", "ok": False, "log": lines, "worker": None, "closed": False}
 
     def tick():
         if state["step"] == "drop":
@@ -522,29 +586,75 @@ def drive(outfit, tag, out, log, timeout_s=900):
             if app.lst.size():
                 log("  drop arrived in the list: %s" % app.lst.get(0))
                 app.start()
+                state["worker"] = app.worker
                 state["step"] = "wait_done"
             elif time.time() - t0 > 10:
                 log("  FAIL: dropped file never showed up in the list")
                 root.destroy()
                 return
         elif state["step"] == "wait_done":
-            if not app.busy:
+            if close_on and app.busy and any(close_on in m for m in lines):
+                log("  closing the window during the refit (WM_CLOSE)")
+                ctypes.windll.user32.PostMessageW(int(root.wm_frame(), 16), 0x10, 0, 0)
+                state["step"] = "closing"
+                state["closed"] = True
+            elif not app.busy:
                 state["ok"] = not errors
                 if errors:
                     log("  FAIL: %s" % errors)
                 root.after(300, root.destroy)
                 return
-            if time.time() - t0 > timeout_s:
+            elif time.time() - t0 > timeout_s:
                 log("  FAIL: refit did not finish in time")
+                root.destroy()
+                return
+        elif state["step"] == "closing":
+            if time.time() - t0 > timeout_s:
+                log("  FAIL: the window did not close")
                 root.destroy()
                 return
         root.after(200, tick)
 
     root.after(500, tick)
     root.mainloop()
+    if state["step"] == "closing":
+        state["ok"] = not errors
     del app, root
     gc.collect()
-    return state["ok"]
+    return state
+
+
+def drive_uninstall(log, pick=lambda entry: True):
+    """Self-test: open the real window, click 'Uninstall...', select the entries pick() accepts, click
+    'Remove selected'. -> list of the dialog's lines."""
+    import gc
+
+    gc.collect()
+    root = tk.Tk()
+    app = App(root, [])
+    shown = []
+    messagebox.showinfo = lambda title, msg, **kw: log("    message: " + msg)
+
+    def go():
+        try:
+            w = app.uninstall()
+            if w is not None:
+                items = core.installed()
+                shown.extend(w.lb.get(0, "end"))
+                for i, e in enumerate(items):
+                    if pick(e):
+                        w.lb.select_set(i)
+                w.remove()
+        finally:
+            root.after(200, root.destroy)
+
+    root.after(300, go)
+    root.mainloop()
+    del app, root
+    gc.collect()
+    for x in shown:
+        log("    list: " + x)
+    return shown
 
 
 def main(files=(), close_after_ms=None):

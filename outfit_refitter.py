@@ -20,7 +20,8 @@ def cli_refit(a):
     files = [
         x
         for i, x in enumerate(a)
-        if not x.startswith("--") and (i == 0 or a[i - 1] not in ("--game", "--body", "--out"))
+        if not x.startswith("--")
+        and (i == 0 or a[i - 1] not in ("--game", "--body", "--out"))
     ]
     res = core.run_batch(
         files,
@@ -30,6 +31,9 @@ def cli_refit(a):
         print,
         do_install="--install" in a,
     )
+    for r in res:
+        if r[3]:
+            print(core.MISSING_TEXT % core.shown_name(r[0]))
     return 0 if all(r[1] or r[2] == "nothing to refit" for r in res) else 1
 
 
@@ -40,11 +44,18 @@ def main():
     ctypes.windll.kernel32.SetPriorityClass(
         ctypes.windll.kernel32.GetCurrentProcess(), 0x4000
     )
-    if (sys.stdout is None or sys.stderr is None) and ("--selftest" in a or "--refit" in a or "--version" in a):
+    if (sys.stdout is None or sys.stderr is None) and (
+        "--selftest" in a or "--refit" in a or "--version" in a
+    ):
         # the windowed exe has no console: write the text to %TEMP%\OutfitRefitter_console.log instead
         import tempfile
-        sys.stdout = sys.stderr = open(os.path.join(tempfile.gettempdir(), "OutfitRefitter_console.log"), "w",
-                                       encoding="utf-8", buffering=1)
+
+        sys.stdout = sys.stderr = open(
+            os.path.join(tempfile.gettempdir(), "OutfitRefitter_console.log"),
+            "w",
+            encoding="utf-8",
+            buffering=1,
+        )
     if "--version" in a:
         import core
 
