@@ -1,0 +1,20 @@
+{
+  "_help": "One entry per body. 'archives' = file-name patterns of the body mod's .archive in archive\\pc\\mod. The body archive must replace the vanilla female body meshes listed in 'meshes'. The entry key is the ArchiveXL {body} name the refit meshes get (e.g. _angel.mesh).",
+  "meshes": [
+    "base\\characters\\common\\player_base_bodies\\player_female_average\\t0_000_pwa_base__full.mesh",
+    "base\\characters\\common\\player_base_bodies\\player_female_average\\arms_hq\\a0_000_pwa_base_hq__l.mesh",
+    "base\\characters\\common\\player_base_bodies\\player_female_average\\arms_hq\\a0_000_pwa_base_hq__r.mesh"
+  ],
+  "bodies": {
+    "angel": {
+      "name": "Hyst Angel",
+      "archives": ["*Hyst_Angel*.archive", "*Angel_Body*.archive"],
+      "page": "https://www.nexusmods.com/cyberpunk2077/mods/14896"
+    },
+    "eve": {
+      "name": "Hyst EVE",
+      "archives": ["*Hyst_EVE_BODY*.archive", "*EVE_BODY*.archive"],
+      "page": "https://www.nexusmods.com/cyberpunk2077/mods/29810"
+    }
+  }
+}

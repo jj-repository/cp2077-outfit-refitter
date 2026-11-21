@@ -1,0 +1,20 @@
+# never commit game files, body shapes or other authors' work
+*.archive
+*.xl
+*.mesh
+*.glb
+*.dll
+*.zip
+*.7z
+*.rar
+settings.json
+installed.json
+
+# build / work folders
+build/
+dist/
+work/
+out/
+*.spec
+__pycache__/
+.venv/
