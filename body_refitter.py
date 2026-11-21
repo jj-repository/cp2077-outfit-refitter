@@ -3,7 +3,8 @@ r"""Body Refitter: refit Cyberpunk 2077 clothing mods to the body mod you use.
 body_refitter.py [outfit ...]                      open the window (files dropped on the exe are pre-added)
 body_refitter.py --refit OUTFIT... --body angel [--install] [--out DIR] [--game DIR]
 body_refitter.py --selftest ...                    see selftest.py
-In the windowed .exe, --refit / --selftest output goes to %TEMP%\BodyRefitter_console.log.
+body_refitter.py --version
+In the windowed .exe, --refit / --selftest / --version output goes to %TEMP%\BodyRefitter_console.log.
 """
 
 import os, sys
@@ -39,11 +40,16 @@ def main():
     ctypes.windll.kernel32.SetPriorityClass(
         ctypes.windll.kernel32.GetCurrentProcess(), 0x4000
     )
-    if (sys.stdout is None or sys.stderr is None) and ("--selftest" in a or "--refit" in a):
+    if (sys.stdout is None or sys.stderr is None) and ("--selftest" in a or "--refit" in a or "--version" in a):
         # the windowed exe has no console: write the text to %TEMP%\BodyRefitter_console.log instead
         import tempfile
         sys.stdout = sys.stderr = open(os.path.join(tempfile.gettempdir(), "BodyRefitter_console.log"), "w",
                                        encoding="utf-8", buffering=1)
+    if "--version" in a:
+        import core
+
+        print("Body Refitter", core.VERSION)
+        return 0
     try:
         if "--selftest" in a:
             import selftest

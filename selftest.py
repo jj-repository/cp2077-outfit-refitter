@@ -115,6 +115,7 @@ def main(a):
 
     log = lambda m: print(m, flush=True)
     fails = []
+    log("Body Refitter %s self-test" % core.VERSION)
     try:
         check_variants(core)
         log("download-variant selection OK")

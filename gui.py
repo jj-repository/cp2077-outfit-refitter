@@ -80,7 +80,7 @@ class App:
         self.root, self.q, self.busy = root, queue.Queue(), False
         self.s = core.load_settings()
         self.tags = list(core.bodies()["bodies"])
-        root.title("Body Refitter")
+        root.title("Body Refitter %s" % core.VERSION)
         root.minsize(560, 520)
         pad = dict(padx=8, pady=3)
 
@@ -107,6 +107,12 @@ class App:
         )
         self.body_info = ttk.Label(f, text="", foreground="#555")
         self.body_info.grid(row=2, column=1, columnspan=2, sticky="w", padx=4)
+        ttk.Label(f, text="Output folder:").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self.out = tk.StringVar(value=self.s.get("out") or core.DEFAULT_OUT)
+        ttk.Entry(f, textvariable=self.out, state="readonly").grid(
+            row=3, column=1, sticky="ew", padx=4, pady=(6, 0)
+        )
+        ttk.Button(f, text="Change...", command=self.pick_out).grid(row=3, column=2, pady=(6, 0))
         f.columnconfigure(1, weight=1)
 
         box = ttk.LabelFrame(
@@ -125,7 +131,7 @@ class App:
 
         o = ttk.Frame(root)
         o.pack(fill="x", **pad)
-        self.inst = tk.BooleanVar(value=self.s.get("install", True))
+        self.inst = tk.BooleanVar(value=self.s.get("install", False))
         ttk.Checkbutton(
             o, text="Install into the game when done", variable=self.inst
         ).pack(side="left")
@@ -218,6 +224,13 @@ class App:
             self.save()
             self.show_body()
 
+    def pick_out(self):
+        d = filedialog.askdirectory(title="Choose where to save the refits", initialdir=self.out_dir())
+        if d:
+            self.out.set(os.path.normpath(d))
+            self.s["out"] = self.out.get()
+            self.save()
+
     def pick_body(self):
         f = filedialog.askopenfilename(
             title="Choose the body mod's .archive", filetypes=[("Archive", "*.archive")]
@@ -264,7 +277,7 @@ class App:
             self.lst.delete(i)
 
     def out_dir(self):
-        return self.s.get("out") or core.DEFAULT_OUT
+        return self.out.get()
 
     def open_out(self):
         os.makedirs(self.out_dir(), exist_ok=True)

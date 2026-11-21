@@ -2,11 +2,22 @@
 
 Make clothing mods fit the body mod you use, yourself, in a few clicks.
 
-> **Status: preview, not released yet.** The tool works in our tests, but nothing has been checked
-> in game yet, and there is no download yet. We are asking the body author (Hyst) for their OK before
-> the first release.
+It supports the female body mods **Hyst Angel** and **Hyst EVE**.
 
-Right now it supports the female body mods **Hyst Angel** and **Hyst EVE**.
+## Quick start
+
+1. Download **BodyRefitter.zip** from the [Releases page](https://github.com/jj-repository/cp2077-body-refitter/releases).
+2. Unzip it anywhere, for example on your Desktop.
+3. Double-click **BodyRefitter.exe** in the `BodyRefitter` folder.
+
+- **Windows SmartScreen** may say "Windows protected your PC", because the tool is new and not signed.
+  Click **More info**, then **Run anyway**.
+- If the tool says the **.NET 10 Runtime** is missing, install Microsoft's free
+  [.NET 10 Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) and start the tool again.
+  WolvenKit needs it.
+- **Use the version of the outfit made for the normal (vanilla) body** as input, not an Angel or EVE version.
+
+WolvenKit (GPL-3.0) is downloaded from its official GitHub release on first run. It is not included in the download.
 
 This repo contains only the tool. It contains **no body files, no clothing and no game files**.
 Everything it needs is read from your own game and your own downloaded mods.
@@ -54,16 +65,18 @@ need a hand-made refit. Always look at the result in game.
    - **Game folder** is found automatically. If not, click **Change...** and pick your Cyberpunk 2077 folder.
    - **Your body mod**: choose Angel or EVE. It should say "found: ...". If it doesn't, the body mod is not
      installed in the game, or click **Body file...** and pick the body mod's `.archive` file.
+   - **Output folder** is where the refits are saved. Click **Change...** to pick another folder.
 4. Drag the clothing mod's download (zip / 7z / rar / folder / .archive) into the window,
-   or click **Add outfit...**. You can add several.
-5. Leave **Install into the game when done** ticked if you want the tool to copy the result into your game.
+   or click **Add outfit...**. You can add several. Use the outfit's **vanilla body** version.
+5. Tick **Install into the game when done** if you want the tool to copy the result into your game.
+   It is off at first, so nothing goes into your game unless you ask for it.
 6. Click **Refit**.
    - The **first time** it downloads WolvenKit (about 45 MB) and reads the body shapes from your game.
      This takes a minute or two and only happens once.
    - After that, each outfit takes from a few seconds to a minute.
 7. Start the game and look at the outfit.
 
-The results are saved in `Documents\Body Refitter`. Click **Open output folder** to see them.
+The results are saved in `Documents\Body Refitter` (or the folder you picked). Click **Open output folder** to see them.
 They are named like `AngelRefit_<outfit>.archive` or `!!!AngelRefit_<outfit>.archive`.
 
 If you did not let the tool install them: copy the files into `<game folder>\archive\pc\mod`.
@@ -99,6 +112,7 @@ The tool only removes files it installed itself.
 ## Credits
 
 - **Hyst** (and xBaebsae) for the Angel and EVE body mods. This tool only works because of their bodies.
+  Thanks to Hyst for the permission to support Angel and EVE.
   Body mod pages: [Angel](https://www.nexusmods.com/cyberpunk2077/mods/14896),
   [EVE](https://www.nexusmods.com/cyberpunk2077/mods/29810),
   [refit resources](https://www.nexusmods.com/cyberpunk2077/mods/17544).
@@ -210,5 +224,5 @@ bodies to be used this way.**
 
 ### Data folder
 
-`%LOCALAPPDATA%\BodyRefitter\`: `settings.json`, `installed.json` (the uninstall list), `wolvenkit\`,
+`%LOCALAPPDATA%\BodyRefitter\`: `settings.json` (game folder, body, output folder, install tick), `installed.json` (the uninstall list), `wolvenkit\`,
 `cages\`, `work\` (temporary), `last_log.txt`. Delete the folder to reset the tool.

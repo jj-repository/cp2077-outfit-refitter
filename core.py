@@ -12,7 +12,35 @@ APP_DIR = getattr(
 DATA = os.environ.get("BODYREFIT_HOME") or os.path.join(
     os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "BodyRefitter"
 )
-DEFAULT_OUT = os.path.join(os.path.expanduser("~"), "Documents", "Body Refitter")
+VERSION = "1.0"
+
+
+def documents_dir():
+    r"""The real Documents folder, also when OneDrive (or the user) moved it. Falls back to %USERPROFILE%\Documents,
+    then to the folder the tool runs from."""
+    try:
+        import ctypes, uuid
+        from ctypes import wintypes
+
+        fid = uuid.UUID("{FDD39AD0-238F-46AF-ADB4-6C85480369C7}")  # FOLDERID_Documents
+        guid = (ctypes.c_byte * 16).from_buffer_copy(fid.bytes_le)
+        p = ctypes.c_wchar_p()
+        sh = ctypes.windll.shell32
+        sh.SHGetKnownFolderPath.argtypes = [ctypes.c_void_p, wintypes.DWORD, wintypes.HANDLE, ctypes.POINTER(ctypes.c_wchar_p)]
+        if sh.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(p)) == 0:
+            d = p.value
+            ctypes.windll.ole32.CoTaskMemFree(p)
+            if d and os.path.isdir(d):
+                return d
+    except Exception:
+        pass
+    d = os.path.join(os.environ.get("USERPROFILE") or os.path.expanduser("~"), "Documents")
+    if os.path.isdir(d):
+        return d
+    return os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
+
+
+DEFAULT_OUT = os.path.join(documents_dir(), "Body Refitter")
 
 WK_VERSION = "9.1.1"
 WK_URL = (
