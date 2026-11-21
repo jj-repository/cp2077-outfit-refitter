@@ -2,6 +2,10 @@
 
 Make clothing mods fit the body mod you use, yourself, in a few clicks.
 
+> **Status: preview, not released yet.** The tool works in our tests, but nothing has been checked
+> in game yet, and there is no download yet. We are asking the body author (Hyst) for their OK before
+> the first release.
+
 Right now it supports the female body mods **Hyst Angel** and **Hyst EVE**.
 
 This repo contains only the tool. It contains **no body files, no clothing and no game files**.
