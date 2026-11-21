@@ -1,4 +1,4 @@
-# Body Refitter for Cyberpunk 2077
+# Outfit Refitter for Cyberpunk 2077
 
 Make clothing mods fit the body mod you use, yourself, in a few clicks.
 
@@ -6,9 +6,9 @@ It supports the female body mods **Hyst Angel** and **Hyst EVE**.
 
 ## Quick start
 
-1. Download **BodyRefitter.zip** from the [Releases page](https://github.com/jj-repository/cp2077-body-refitter/releases).
+1. Download **OutfitRefitter.zip** from the [Releases page](https://github.com/jj-repository/cp2077-outfit-refitter/releases).
 2. Unzip it anywhere, for example on your Desktop.
-3. Double-click **BodyRefitter.exe** in the `BodyRefitter` folder.
+3. Double-click **OutfitRefitter.exe** in the `OutfitRefitter` folder.
 
 - **Windows SmartScreen** may say "Windows protected your PC", because the tool is new and not signed.
   Click **More info**, then **Run anyway**.
@@ -60,7 +60,7 @@ need a hand-made refit. Always look at the result in game.
 ## How to use it
 
 1. Install your body mod and the clothing mod as usual.
-2. Unzip Body Refitter anywhere (for example on your Desktop) and start **BodyRefitter.exe**.
+2. Unzip Outfit Refitter anywhere (for example on your Desktop) and start **OutfitRefitter.exe**.
 3. Check the top of the window:
    - **Game folder** is found automatically. If not, click **Change...** and pick your Cyberpunk 2077 folder.
    - **Your body mod**: choose Angel or EVE. It should say "found: ...". If it doesn't, the body mod is not
@@ -76,7 +76,7 @@ need a hand-made refit. Always look at the result in game.
    - After that, each outfit takes from a few seconds to a minute.
 7. Start the game and look at the outfit.
 
-The results are saved in `Documents\Body Refitter` (or the folder you picked). Click **Open output folder** to see them.
+The results are saved in `Documents\Outfit Refitter` (or the folder you picked). Click **Open output folder** to see them.
 They are named like `AngelRefit_<outfit>.archive` or `!!!AngelRefit_<outfit>.archive`.
 
 If you did not let the tool install them: copy the files into `<game folder>\archive\pc\mod`.
@@ -158,13 +158,13 @@ Output:
 ### Body shapes, WolvenKit and the Oodle DLL
 
 - Body shapes are exported on first run from the user's own files into
-  `%LOCALAPPDATA%\BodyRefitter\cages\`: the vanilla female body + arms from the base game, and the
+  `%LOCALAPPDATA%\OutfitRefitter\cages\`: the vanilla female body + arms from the base game, and the
   same three meshes from the installed body mod's `.archive`. They are re-read when the source file
   changes. Nothing is shipped.
 - WolvenKit.CLI **9.1.1** (`WolvenKit.Console-9.1.1.zip`) is downloaded from
   `github.com/WolvenKit/WolvenKit/releases`, checked against its SHA-256
   (`a14eae46931251635256e7b209cd4aa998ae5039a5fbd506fefaab671bf7f451`) and unpacked to
-  `%LOCALAPPDATA%\BodyRefitter\wolvenkit\`. Its `appsettings.json` is set to export meshes without
+  `%LOCALAPPDATA%\OutfitRefitter\wolvenkit\`. Its `appsettings.json` is set to export meshes without
   materials and with all LODs. **WolvenKit...** in the window copies an existing WolvenKit install instead.
 - The game's `oo2ext_7_win64.dll` is copied from `<game>\bin\x64` to `%LOCALAPPDATA%`, where WolvenKit
   9.1.1 looks for it. Without it, WolvenKit silently uses a fallback that breaks big buffers.
@@ -174,7 +174,7 @@ Output:
 
 | File | What it does |
 | --- | --- |
-| `body_refitter.py` | Entry point: window, `--refit` command line, `--selftest` |
+| `outfit_refitter.py` | Entry point: window, `--refit` command line, `--selftest` |
 | `gui.py` | The window (Python's built-in tkinter) |
 | `core.py` | Game detection, WolvenKit download, body shapes, unpacking downloads, install list |
 | `refit.py` | The refit itself, the WolvenKit buffer repair, the final safety check |
@@ -187,8 +187,8 @@ Output:
 
 ```
 python -m pip install numpy scipy
-python body_refitter.py                                   (window)
-python body_refitter.py --refit "C:\Downloads\Some Outfit.zip" --body angel [--install]
+python outfit_refitter.py                                   (window)
+python outfit_refitter.py --refit "C:\Downloads\Some Outfit.zip" --body angel [--install]
 ```
 
 ### Building the Windows version
@@ -198,13 +198,13 @@ build_exe.bat
 ```
 
 This creates a local `.venv`, installs numpy, scipy and PyInstaller, and runs
-`PyInstaller --onedir --windowed --name BodyRefitter --add-data "bodies.json;." --add-data "README.md;." --add-data "LICENSE;." body_refitter.py`.
-The result is `dist\BodyRefitter\` (zip that folder for release).
+`PyInstaller --onedir --windowed --name OutfitRefitter --add-data "bodies.json;." --add-data "README.md;." --add-data "LICENSE;." outfit_refitter.py`.
+The result is `dist\OutfitRefitter\` (zip that folder for release).
 
 ### Self-test
 
 ```
-python body_refitter.py --selftest --home <empty folder> --out <folder>
+python outfit_refitter.py --selftest --home <empty folder> --out <folder>
        [--body-archive eve=<path to 05_Hyst_EVE_BODY.archive>]
        [--case angel=<outfit>=<a refit you trust.archive>] [--case eve=<outfit>] ...
 ```
@@ -213,7 +213,7 @@ It checks the download-variant selection, detects the game, downloads and checks
 (a real first run), extracts the body shapes, refits each `--case`, runs the safety check, lists the
 output archive and, if a reference refit is given, prints the vertex distance per mesh. `--gui` also opens
 the window for two seconds. Exit code 0 = passed. In the windowed `.exe`, the text goes to
-`%TEMP%\BodyRefitter_console.log`.
+`%TEMP%\OutfitRefitter_console.log`.
 
 ### Adding a body
 
@@ -224,5 +224,5 @@ bodies to be used this way.**
 
 ### Data folder
 
-`%LOCALAPPDATA%\BodyRefitter\`: `settings.json` (game folder, body, output folder, install tick), `installed.json` (the uninstall list), `wolvenkit\`,
+`%LOCALAPPDATA%\OutfitRefitter\`: `settings.json` (game folder, body, output folder, install tick), `installed.json` (the uninstall list), `wolvenkit\`,
 `cages\`, `work\` (temporary), `last_log.txt`. Delete the folder to reset the tool.

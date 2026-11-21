@@ -2,10 +2,10 @@ r"""Headless self-test: game detection, WolvenKit download/check, body-shape ext
 then refit real outfit archives, run the safety check and list the output. Optionally compares the vertex positions
 with refits you trust (e.g. ones made by hand).
 
-  body_refitter.py --selftest [--home DIR] [--out DIR] [--game DIR] [--wolvenkit DIR]
+  outfit_refitter.py --selftest [--home DIR] [--out DIR] [--game DIR] [--wolvenkit DIR]
                    [--body-archive TAG=FILE ...] [--case TAG=OUTFIT[=REFERENCE.archive] ...] [--gui]
 
---home: data folder to use instead of %LOCALAPPDATA%\BodyRefitter (fresh folder = real first run).
+--home: data folder to use instead of %LOCALAPPDATA%\OutfitRefitter (fresh folder = real first run).
 --gui: also open the window for two seconds and close it (proves it starts).
 --gui-drop TAG=OUTFIT: open the real window, drop OUTFIT on it like Explorer does, press Refit, check the result.
 Exit code 0 = everything passed."""
@@ -116,7 +116,7 @@ def main(a):
 
     log = lambda m: print(m, flush=True)
     fails = []
-    log("Body Refitter %s self-test" % core.VERSION)
+    log("Outfit Refitter %s self-test" % core.VERSION)
     try:
         check_variants(core)
         log("download-variant selection OK")

@@ -10,8 +10,15 @@ APP_DIR = getattr(
     sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))
 )  # PyInstaller unpack dir or source
 DATA = os.environ.get("BODYREFIT_HOME") or os.path.join(
-    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "BodyRefitter"
+    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "OutfitRefitter"
 )
+_OLD_DATA = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "BodyRefitter")
+if not os.environ.get("BODYREFIT_HOME") and not os.path.exists(DATA) and os.path.isdir(_OLD_DATA):
+    try:  # the tool was called Body Refitter in 1.0: move its data folder over once
+        os.rename(_OLD_DATA, DATA)
+    except OSError:
+        DATA = _OLD_DATA
+
 VERSION = "1.0"
 
 
@@ -40,7 +47,7 @@ def documents_dir():
     return os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
 
 
-DEFAULT_OUT = os.path.join(documents_dir(), "Body Refitter")
+DEFAULT_OUT = os.path.join(documents_dir(), "Outfit Refitter")
 
 WK_VERSION = "9.1.1"
 WK_URL = (
@@ -244,7 +251,7 @@ def ensure_wolvenkit(log, progress=lambda f: None, existing=None):
             with (
                 urllib.request.urlopen(
                     urllib.request.Request(
-                        WK_URL, headers={"User-Agent": "BodyRefitter"}
+                        WK_URL, headers={"User-Agent": "OutfitRefitter"}
                     ),
                     timeout=60,
                 ) as r,

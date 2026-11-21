@@ -119,7 +119,7 @@ class App:
         self.root, self.q, self.busy = root, queue.Queue(), False
         self.s = core.load_settings()
         self.tags = list(core.bodies()["bodies"])
-        root.title("Body Refitter %s" % core.VERSION)
+        root.title("Outfit Refitter %s" % core.VERSION)
         root.minsize(560, 520)
         pad = dict(padx=8, pady=3)
 
@@ -262,7 +262,7 @@ class App:
             d = os.path.normpath(d)
             if not core.is_game_dir(d):
                 messagebox.showerror(
-                    "Body Refitter",
+                    "Outfit Refitter",
                     "That is not the game folder (no bin\\x64\\Cyberpunk2077.exe).",
                 )
                 return
@@ -287,7 +287,7 @@ class App:
             try:
                 core.check_body_archive(f)
             except (core.ToolError, OSError, ValueError) as e:
-                messagebox.showerror("Body Refitter", str(e))
+                messagebox.showerror("Outfit Refitter", str(e))
                 return
             self.s.setdefault("body_archive", {})[self.tag()] = os.path.normpath(f)
             self.save()
@@ -300,7 +300,7 @@ class App:
         if d:
             if not os.path.isfile(os.path.join(d, "WolvenKit.CLI.exe")):
                 messagebox.showerror(
-                    "Body Refitter", "No WolvenKit.CLI.exe in that folder."
+                    "Outfit Refitter", "No WolvenKit.CLI.exe in that folder."
                 )
                 return
             self.s["wk_existing"] = os.path.normpath(d)
@@ -329,7 +329,7 @@ class App:
 
     def show_help(self):
         w = tk.Toplevel(self.root)
-        w.title("Body Refitter - Help")
+        w.title("Outfit Refitter - Help")
         w.transient(self.root)
         t = tk.Text(
             w, width=74, height=30, wrap="word", font=("Segoe UI", 10), padx=10, pady=8
@@ -347,7 +347,7 @@ class App:
     def uninstall(self):
         items = core.installed()
         if not items:
-            messagebox.showinfo("Body Refitter", "No refits installed by this tool.")
+            messagebox.showinfo("Outfit Refitter", "No refits installed by this tool.")
             return
         w = tk.Toplevel(self.root)
         w.title("Installed refits")
@@ -378,7 +378,7 @@ class App:
             return
         files = list(self.lst.get(0, "end"))
         if not files:
-            messagebox.showinfo("Body Refitter", "Add at least one outfit first.")
+            messagebox.showinfo("Outfit Refitter", "Add at least one outfit first.")
             return
         self.save()
         self.busy = True
@@ -456,7 +456,7 @@ class App:
                     except OSError:
                         pass
                     if kind == "error":
-                        messagebox.showerror("Body Refitter", v)
+                        messagebox.showerror("Outfit Refitter", v)
         except queue.Empty:
             pass
         self.root.after(100, self.poll)
