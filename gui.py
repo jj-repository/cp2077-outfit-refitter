@@ -86,6 +86,34 @@ def enable_drop(root, callback):
         return False
 
 
+HELP_TEXT = """What this tool does
+Most clothing mods are made for the normal (vanilla) body. This tool reshapes an outfit so it fits your body mod (Hyst Angel or Hyst EVE). It makes one small extra file; the original outfit stays untouched.
+
+Steps, in order
+1. Game folder: check that the top line shows your Cyberpunk 2077 folder. If not, click 'Change...' next to it and pick the folder that contains 'bin' and 'archive'.
+
+2. Your body mod: pick Hyst Angel or Hyst EVE. Below it you should see 'found: ...'. If it says 'not found', install that body mod first, or click 'Body file...' and pick its .archive.
+
+3. Output folder: where the finished refits are saved. Click 'Change...' to pick another folder.
+
+4. Add the outfit: drag its download (zip / 7z / rar), its unpacked folder or its .archive file into the big list. Or use 'Add outfit...' / 'Add folder...'. Use the outfit's VANILLA-body version. You can add several outfits at once.
+
+5. Install: tick 'Install into the game when done' if the tool should put the refit straight into your game. Leave it unticked to only save the file in the output folder.
+
+6. Click 'Refit'. The bar and the log below show the progress. The first run takes longer: the tool downloads WolvenKit (about 45 MB) and reads the body shape from your game once.
+
+7. Done. If you didn't tick Install, click 'Open output folder' and copy the .archive file(s) into <game folder>\\archive\\pc\\mod. Keep the original outfit installed as well; the refit only reshapes it.
+
+Undo
+'Uninstall refits...' removes refits this tool installed. Or delete the AngelRefit_/EveRefit_ file from archive\\pc\\mod.
+
+Good to know
+- Refits are for your own game. Don't upload refits of other people's outfits without the outfit author's permission.
+- If something is skipped (for example glasses or props), the log says so; the rest of the outfit is still refit.
+- 'WolvenKit...' lets you use a WolvenKit you already have instead of downloading it.
+"""
+
+
 class App:
     def __init__(self, root, files):
         self.root, self.q, self.busy = root, queue.Queue(), False
@@ -161,7 +189,10 @@ class App:
         ttk.Button(a, text="Uninstall refits...", command=self.uninstall).pack(
             side="left"
         )
-        ttk.Button(a, text="WolvenKit...", command=self.pick_wk).pack(side="right")
+        ttk.Button(a, text="Help", command=self.show_help).pack(side="right")
+        ttk.Button(a, text="WolvenKit...", command=self.pick_wk).pack(
+            side="right", padx=4
+        )
 
         self.prog = ttk.Progressbar(root, maximum=1.0)
         self.prog.pack(fill="x", **pad)
@@ -295,6 +326,19 @@ class App:
 
     def out_dir(self):
         return self.out.get()
+
+    def show_help(self):
+        w = tk.Toplevel(self.root)
+        w.title("Body Refitter - Help")
+        w.transient(self.root)
+        t = tk.Text(
+            w, width=74, height=30, wrap="word", font=("Segoe UI", 10), padx=10, pady=8
+        )
+        t.pack(fill="both", expand=True)
+        t.insert("end", HELP_TEXT)
+        t["state"] = "disabled"
+        ttk.Button(w, text="Close", command=w.destroy).pack(pady=6)
+        return w
 
     def open_out(self):
         os.makedirs(self.out_dir(), exist_ok=True)
@@ -465,6 +509,13 @@ def drive(outfit, tag, out, log, timeout_s=900):
 
     def tick():
         if state["step"] == "drop":
+            h = app.show_help()
+            root.update()
+            ok_help = "Steps, in order" in h.winfo_children()[0].get("1.0", "end")
+            h.destroy()
+            log("  help window %s" % ("OK" if ok_help else "EMPTY"))
+            if not ok_help:
+                errors.append("help window empty")
             post_drop(root, [outfit])
             state["step"] = "wait_list"
         elif state["step"] == "wait_list":
