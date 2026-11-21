@@ -4,7 +4,7 @@ import os, queue, threading, traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-import core
+import core, support
 
 OUTFIT_TYPES = [
     ("Outfit downloads", "*.zip *.7z *.rar *.archive"),
@@ -112,11 +112,27 @@ Good to know
 - Refits are for your own game. Don't upload refits of other people's outfits without the outfit author's permission.
 - If something is skipped (for example glasses or props), the log says so; the rest of the outfit is still refit.
 - 'WolvenKit...' lets you use a WolvenKit you already have instead of downloading it.
+
+Having a problem?
+Click 'Support report...' and send the file it makes to the mod author. It lists what you did in the tool, the log, and what the tool finds in your game folder. Your Windows user name is left out, and no file contents are included. You can open the file first to see what's inside.
 """
+
+
+# log lines that are errors in the support report
+ERROR_LINES = (
+    "Unexpected error",
+    "Could not refit",
+    "Stopped",
+    "Not installed",
+    "Not copied",
+    "The original outfit could not",
+)
 
 
 class App:
     def __init__(self, root, files):
+        support.rotate_sessions()
+        self.session, self.results = support.Session(), []
         self.root, self.q, self.busy = root, queue.Queue(), False
         self.cancel, self.worker = threading.Event(), None
         root.report_callback_exception = self.on_error
@@ -134,7 +150,7 @@ class App:
         ttk.Entry(f, textvariable=self.game, state="readonly").grid(
             row=0, column=1, sticky="ew", padx=4
         )
-        ttk.Button(f, text="Change...", command=self.pick_game).grid(row=0, column=2)
+        self.button(f, "Change...", self.pick_game).grid(row=0, column=2)
         ttk.Label(f, text="Your body mod:").grid(
             row=1, column=0, sticky="w", pady=(6, 0)
         )
@@ -145,7 +161,7 @@ class App:
         )
         cb.grid(row=1, column=1, sticky="w", padx=4, pady=(6, 0))
         cb.bind("<<ComboboxSelected>>", lambda e: self.show_body())
-        ttk.Button(f, text="Body file...", command=self.pick_body).grid(
+        self.button(f, "Body file...", self.pick_body).grid(
             row=1, column=2, pady=(6, 0)
         )
         self.body_info = ttk.Label(f, text="", foreground="#555")
@@ -157,9 +173,7 @@ class App:
         ttk.Entry(f, textvariable=self.out, state="readonly").grid(
             row=3, column=1, sticky="ew", padx=4, pady=(6, 0)
         )
-        ttk.Button(f, text="Change...", command=self.pick_out).grid(
-            row=3, column=2, pady=(6, 0)
-        )
+        self.button(f, "Change...", self.pick_out).grid(row=3, column=2, pady=(6, 0))
         f.columnconfigure(1, weight=1)
 
         box = ttk.LabelFrame(
@@ -170,11 +184,9 @@ class App:
         self.lst.pack(fill="both", expand=True, padx=6, pady=4)
         b = ttk.Frame(box)
         b.pack(fill="x", padx=6, pady=(0, 6))
-        ttk.Button(b, text="Add outfit...", command=self.add_files).pack(side="left")
-        ttk.Button(b, text="Add folder...", command=self.add_folder).pack(
-            side="left", padx=4
-        )
-        ttk.Button(b, text="Remove", command=self.remove_sel).pack(side="left")
+        self.button(b, "Add outfit...", self.add_files).pack(side="left")
+        self.button(b, "Add folder...", self.add_folder).pack(side="left", padx=4)
+        self.button(b, "Remove", self.remove_sel).pack(side="left")
 
         o = ttk.Frame(root)
         o.pack(fill="x", **pad)
@@ -185,18 +197,15 @@ class App:
 
         a = ttk.Frame(root)
         a.pack(fill="x", **pad)
-        self.go = ttk.Button(a, text="Refit", command=self.start)
+        self.go = self.button(a, "Refit", self.start)
         self.go.pack(side="left")
-        ttk.Button(a, text="Open output folder", command=self.open_out).pack(
-            side="left", padx=4
+        self.button(a, "Open output folder", self.open_out).pack(side="left", padx=4)
+        self.button(a, "Uninstall...", self.uninstall).pack(side="left")
+        self.button(a, "Help", self.show_help).pack(side="right")
+        self.button(a, "Support report...", self.support_report).pack(
+            side="right", padx=(4, 0)
         )
-        ttk.Button(a, text="Uninstall...", command=self.uninstall).pack(
-            side="left"
-        )
-        ttk.Button(a, text="Help", command=self.show_help).pack(side="right")
-        ttk.Button(a, text="WolvenKit...", command=self.pick_wk).pack(
-            side="right", padx=4
-        )
+        self.button(a, "WolvenKit...", self.pick_wk).pack(side="right", padx=4)
 
         self.prog = ttk.Progressbar(root, maximum=1.0)
         self.prog.pack(fill="x", **pad)
@@ -210,9 +219,29 @@ class App:
         sb.pack(side="right", fill="y")
         self.log_box.pack(fill="both", expand=True)
 
-        if not enable_drop(root, self.add):
+        # record every change of these, also from the self-test; the traces are removed with the window, or
+        # Tcl keeps them (and this whole window) alive and fires its old timers into the next window
+        traces = [
+            (var, var.trace_add("write", lambda *x, n=name, v=var: self.rec("action", "%s set to: %s" % (n, v.get()))))
+            for name, var in (("game folder", self.game), ("body", self.body), ("output folder", self.out))
+        ]
+        traces.append(
+            (
+                self.inst,
+                self.inst.trace_add(
+                    "write",
+                    lambda *x: self.rec("action", "install box " + ("ticked" if self.inst.get() else "unticked")),
+                ),
+            )
+        )
+        root.bind(
+            "<Destroy>",
+            lambda e: [v.trace_remove("write", t) for v, t in traces] if e.widget is root else None,
+            add="+",
+        )
+        if not enable_drop(root, lambda f: self.add(f, "dropped")):
             box["text"] = "Outfits to refit (zip / 7z / rar / folder / .archive)"
-        self.add(files)
+        self.add(files, "added from the command line")
         self.show_body()
         if not core.is_game_dir(self.game.get()):
             self.log(
@@ -220,13 +249,34 @@ class App:
             )
         else:
             self.log("Ready. Add outfits, check the body, then press Refit.")
+        root.update_idletasks()  # never shrink the window so far that buttons get cut off
+        root.minsize(max(560, a.winfo_reqwidth() + 16), 520)
         root.after(100, self.poll)
 
     # ---- helpers ----
     def tag(self):
         return self.tags[[core.body_name(t) for t in self.tags].index(self.body.get())]
 
+    def rec(self, kind, text):
+        self.session.add(kind, text)
+
+    def button(self, parent, text, cmd):
+        """A button whose clicks go into the session record."""
+        return ttk.Button(
+            parent,
+            text=text,
+            command=lambda: (self.rec("action", "clicked '%s'" % text), cmd()),
+        )
+
+    def msg(self, kind, text):
+        """Message box (kind: error / info), recorded."""
+        self.rec("message", text)
+        (messagebox.showerror if kind == "error" else messagebox.showinfo)(
+            "Outfit Refitter", text
+        )
+
     def log(self, msg):
+        self.rec("error" if msg.startswith(ERROR_LINES) else "log", msg)
         self.log_box["state"] = "normal"
         self.log_box.insert("end", msg + "\n")
         self.log_box.see("end")
@@ -253,11 +303,13 @@ class App:
             % core.body_name(t)
         )
 
-    def add(self, files):
+    def add(self, files, how="added"):
         have = set(self.lst.get(0, "end"))
         for f in files:
             if f not in have:
                 self.lst.insert("end", f)
+                have.add(f)
+                self.rec("action", "%s outfit: %s" % (how, f))
 
     # ---- buttons ----
     def pick_game(self):
@@ -265,8 +317,8 @@ class App:
         if d:
             d = os.path.normpath(d)
             if not core.is_game_dir(d):
-                messagebox.showerror(
-                    "Outfit Refitter",
+                self.msg(
+                    "error",
                     "That is not the game folder (no bin\\x64\\Cyberpunk2077.exe).",
                 )
                 return
@@ -291,7 +343,7 @@ class App:
             try:
                 core.check_body_archive(f)
             except (core.ToolError, OSError, ValueError) as e:
-                messagebox.showerror("Outfit Refitter", str(e))
+                self.msg("error", str(e))
                 return
             self.s.setdefault("body_archive", {})[self.tag()] = os.path.normpath(f)
             self.save()
@@ -303,11 +355,10 @@ class App:
         )
         if d:
             if not os.path.isfile(os.path.join(d, "WolvenKit.CLI.exe")):
-                messagebox.showerror(
-                    "Outfit Refitter", "No WolvenKit.CLI.exe in that folder."
-                )
+                self.msg("error", "No WolvenKit.CLI.exe in that folder.")
                 return
             self.s["wk_existing"] = os.path.normpath(d)
+            self.rec("action", "WolvenKit folder picked: %s" % d)
             self.save()
             self.log("WolvenKit will be copied from %s on the next refit." % d)
 
@@ -326,6 +377,7 @@ class App:
 
     def remove_sel(self):
         for i in reversed(self.lst.curselection()):
+            self.rec("action", "removed outfit: %s" % self.lst.get(i))
             self.lst.delete(i)
 
     def out_dir(self):
@@ -344,6 +396,35 @@ class App:
         ttk.Button(w, text="Close", command=w.destroy).pack(pady=6)
         return w
 
+    def support_report(self):
+        """Write the support report into the output folder, show it in Explorer. Never raises."""
+        try:
+            settings = dict(self.s, body=self.tag(), install=self.inst.get())
+            text = support.build(
+                self.session,
+                settings,
+                self.game.get(),
+                self.out_dir(),
+                list(self.lst.get(0, "end")),
+                list(self.results),
+            )
+            p = support.write(self.out_dir(), text)
+        except Exception as e:
+            self.rec("error", "support report failed:\n" + traceback.format_exc())
+            self.msg("error", "Could not write the support report: %s" % e)
+            return None
+        self.rec("action", "support report saved: %s" % p)
+        try:
+            support.show_in_explorer(p)
+        except Exception as e:
+            self.rec("error", "could not open Explorer: %r" % e)
+        self.msg(
+            "info",
+            "Saved. Send this file to the mod author. You can open it first to see what's inside.\n\n%s"
+            % p,
+        )
+        return p
+
     def open_out(self):
         os.makedirs(self.out_dir(), exist_ok=True)
         os.startfile(self.out_dir())
@@ -351,9 +432,7 @@ class App:
     def uninstall(self):
         items = core.installed()
         if not items:
-            messagebox.showinfo(
-                "Outfit Refitter", "This tool has not put anything into your game."
-            )
+            self.msg("info", "This tool has not put anything into your game.")
             return None
         w = tk.Toplevel(self.root)
         w.title("Installed by Outfit Refitter")
@@ -380,6 +459,11 @@ class App:
 
         def rm():
             sel = [items[i] for i in lb.curselection()]
+            self.rec(
+                "action",
+                "uninstall picked: %s"
+                % ("; ".join(e.get("rel", e["file"]) for e in sel) or "nothing"),
+            )
             if sel:
                 core.uninstall(sel, self.log)
             w.destroy()
@@ -397,9 +481,12 @@ class App:
     def on_error(self, exc, val, tb):
         """A bug in a button or timer: write it to the log and say so plainly instead of failing silently."""
         try:
-            self.log("Unexpected error:\n" + "".join(traceback.format_exception(exc, val, tb)))
-            messagebox.showerror(
-                "Outfit Refitter",
+            self.log(
+                "Unexpected error:\n"
+                + "".join(traceback.format_exception(exc, val, tb))
+            )
+            self.msg(
+                "error",
                 "Something went wrong in the window. The details are in the log at the bottom.",
             )
         except Exception:
@@ -409,9 +496,18 @@ class App:
         """Window closed: stop the refit, but let a copy into the game finish first, so the game never keeps a
         half-copied file (the uninstall list is saved after every file)."""
         self.cancel.set()
+        if (
+            self.session.actions
+        ):  # an empty run must not push the last real session out of 'previous'
+            self.rec("action", "window closed")
+            self.session.save()
         core.stop_tools()
         got = core.INSTALL_LOCK.acquire(timeout=120)
         try:
+            for i in self.root.tk.call(
+                "after", "info"
+            ):  # no timer may fire once the window is gone
+                self.root.after_cancel(i)
             self.root.destroy()
         finally:
             if got:
@@ -422,9 +518,20 @@ class App:
             return
         files = list(self.lst.get(0, "end"))
         if not files:
-            messagebox.showinfo("Outfit Refitter", "Add at least one outfit first.")
+            self.msg("info", "Add at least one outfit first.")
             return
         self.save()
+        self.rec(
+            "action",
+            "Refit started: %d outfit(s), body %s, install %s, game %s, output %s"
+            % (
+                len(files),
+                self.body.get(),
+                "ticked" if self.inst.get() else "unticked",
+                self.game.get(),
+                self.out_dir(),
+            ),
+        )
         self.busy = True
         self.go["state"] = "disabled"
         self.prog["value"] = 0
@@ -479,7 +586,7 @@ class App:
                     "Refits are for your own game only. Please don't upload refits of other people's outfits "
                     "without the outfit author's permission."
                 )
-            q.put(("done", None))
+            q.put(("done", [(r[0], r[1]) for r in res]))
         except core.ToolError as e:
             put("Stopped: %s" % e)
             q.put(("error", str(e)))
@@ -500,16 +607,15 @@ class App:
                     self.go["state"] = "normal"
                     self.prog["value"] = 1.0 if kind == "done" else self.prog["value"]
                     self.save()
-                    try:
-                        open(
-                            os.path.join(core.DATA, "last_log.txt"),
-                            "w",
-                            encoding="utf-8",
-                        ).write(self.log_box.get("1.0", "end"))
-                    except OSError:
-                        pass
+                    if kind == "done":
+                        self.results += v
+                    self.rec(
+                        "action",
+                        "Refit finished" if kind == "done" else "Refit stopped: %s" % v,
+                    )
+                    self.session.save()
                     if kind == "error":
-                        messagebox.showerror("Outfit Refitter", v)
+                        self.msg("error", v)
         except queue.Empty:
             pass
         self.root.after(100, self.poll)
@@ -542,7 +648,15 @@ def post_drop(root, paths):
 
 
 def drive(
-    outfit, tag, out, log, timeout_s=900, game=None, install=False, body_file=None, close_on=None
+    outfit,
+    tag,
+    out,
+    log,
+    timeout_s=900,
+    game=None,
+    install=False,
+    body_file=None,
+    close_on=None,
 ):
     """Self-test: open the real window, drop an outfit on it, pick the body (and game folder, body file, Install
     tick), press Refit, wait for the result. close_on: text; when it shows up in the log, the window gets a real
@@ -622,6 +736,44 @@ def drive(
     del app, root
     gc.collect()
     return state
+
+
+def drive_script(script, log, timeout_s=900):
+    """Self-test: open the real window and run script(app, root), a generator. Each yield gives a function; the
+    script goes on once it returns True, while the window keeps running. -> True when the script got to its end."""
+    import gc, time
+
+    gc.collect()
+    root = tk.Tk()
+    app = App(root, [])
+    gen, t0, state = script(app, root), time.time(), {"ok": False}
+
+    def stop(delay=0):
+        try:
+            root.after(delay, root.destroy)
+        except tk.TclError:  # the script closed the window itself
+            pass
+
+    def step(wait):
+        try:
+            if wait is None or wait():
+                wait = next(gen)
+        except StopIteration:
+            state["ok"] = True
+            return stop(300)
+        except Exception:
+            log("  FAIL: test script crashed:\n" + traceback.format_exc())
+            return stop()
+        if time.time() - t0 > timeout_s:
+            log("  FAIL: test script timed out")
+            return stop()
+        root.after(200, step, wait)
+
+    root.after(500, step, None)
+    root.mainloop()
+    del app, root, gen
+    gc.collect()
+    return state["ok"]
 
 
 def drive_uninstall(log, pick=lambda entry: True):

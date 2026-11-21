@@ -91,6 +91,14 @@ Click **Uninstall...**. The list shows everything the tool put into your game:
 Select what you want to remove and click **Remove selected**.
 The tool only removes files it installed itself.
 
+## Having a problem?
+
+Click **Support report...** and send the file it makes to the mod author.
+It is a plain text file, saved in your output folder; the tool opens that folder for you.
+It lists what you did in the tool, the log, any errors, your settings, and what the tool finds in your game folder
+(game, ArchiveXL, TweakXL, Codeware, RED4ext, body mods, the outfits' files, the refits).
+It contains no file contents, and your Windows user name is replaced. You can open it first to see what's inside.
+
 ## Good to know
 
 - **Use the version of the outfit made for the normal (vanilla) body.** If you give it an outfit that was
@@ -191,6 +199,7 @@ Output:
 | `refit.py` | The refit itself, the WolvenKit buffer repair, the final safety check |
 | `rdar.py` | Reading `.archive` / CR2W files, the game's Oodle library, buffer checks |
 | `bodies.json` | Supported bodies |
+| `support.py` | The session record and the support report |
 | `selftest.py` | Headless test |
 | `build_exe.bat` | Builds the Windows version |
 
@@ -225,7 +234,9 @@ It checks the download-variant selection, detects the game, downloads and checks
 output archive and, if a reference refit is given, prints the vertex distance per mesh. `--gui` also opens
 the window for two seconds. `--gui-install <folder> --gui-install-outfit <outfit>=><expected file>;...` runs the
 Install tests in the real window on a fake game folder it makes in `<folder>` (original missing, original already
-there, Install unticked, Uninstall, closing the window mid-refit); the real game folder is only read. Exit code 0 = passed. In the windowed `.exe`, the text goes to
+there, Install unticked, Uninstall, closing the window mid-refit); the real game folder is only read.
+`--support <folder> --support-outfit <outfit>` (three times) tests **Support report...** in the real window on two
+fake game folders (with and without ArchiveXL etc.), including a restart. Exit code 0 = passed. In the windowed `.exe`, the text goes to
 `%TEMP%\OutfitRefitter_console.log`.
 
 ### Adding a body
@@ -238,4 +249,5 @@ bodies to be used this way.**
 ### Data folder
 
 `%LOCALAPPDATA%\OutfitRefitter\`: `settings.json` (game folder, body, output folder, install tick), `installed.json` (the uninstall list: refits and original outfits the tool installed), `wolvenkit\`,
-`cages\`, `work\` (temporary), `last_log.txt`. Delete the folder to reset the tool.
+`cages\`, `work\` (temporary), `last_session.txt` and `previous_session.txt` (what happened in the window in this
+and the last run, for the support report). Delete the folder to reset the tool.

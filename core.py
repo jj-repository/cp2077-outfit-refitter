@@ -25,7 +25,7 @@ if (
     except OSError:
         DATA = _OLD_DATA
 
-VERSION = "1.1"
+VERSION = "1.2"
 
 
 def documents_dir():
@@ -358,7 +358,9 @@ def find_body_archive(game, tag):
             try:
                 if want in rdar.Rdar(p).hashes():
                     hits.append(p)
-            except (OSError, ValueError):
+            except (
+                Exception
+            ):  # a broken or cut-off archive (struct.error too) is just not the body
                 pass
     return max(hits, key=os.path.getsize) if hits else None
 
@@ -510,6 +512,13 @@ def prepare_input(path, dest, log):
     arcs = sorted(glob.glob(os.path.join(root, "**", "*.archive"), recursive=True))
     if not arcs:
         raise ToolError("No .archive file found in %s." % os.path.basename(path))
+    return choose_archives(arcs, root, log)
+
+
+def choose_archives(arcs, root, log):
+    """The .archive files to use out of a download's (paths under root, sorted). Several body versions -> the
+    vanilla one. Works on names only (the support report uses it on a zip's file list)."""
+    arcs = sorted(arcs)
     groups = {}
     for a in arcs:
         groups.setdefault(os.path.basename(a).lower(), []).append(a)

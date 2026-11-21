@@ -12,6 +12,8 @@ with refits you trust (e.g. ones made by hand).
     game folder made in DIR (original missing / already there / Install unticked / Uninstall / closing the window).
     REL: the original outfit's files expected in the game, relative to the game folder. --no-wait: don't wait for
     the refit stopped by closing the window (the process exits while it ends).
+--support DIR --support-outfit OUTFIT (3x: two zips with r6\tweaks, then one more): 'Support report...' tests in the
+    real window on two fake games made in DIR (with / without ArchiveXL etc.), incl. a restart (previous session).
 Exit code 0 = everything passed."""
 
 import glob, os, shutil, sys, tempfile, traceback
@@ -403,7 +405,10 @@ def gui_install_tests(core, gui, a, log, fails):
         )
     finally:
         core._copy = copy
-    check("close while installing: window closed while files were being copied", st["closed"])
+    check(
+        "close while installing: window closed while files were being copied",
+        st["closed"],
+    )
     lst = core.installed()
     parts = [f for f in snap(game) if f.endswith(".part")]
     check("close while installing: no half-copied files", not parts, parts)
@@ -450,6 +455,382 @@ def gui_install_tests(core, gui, a, log, fails):
     )
 
 
+def check_scrub():
+    """The user name and profile path never survive into a support report, in any spelling."""
+    import support
+
+    user = os.environ.get("USERNAME") or os.path.basename(os.path.expanduser("~"))
+    prof = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    raw = "\n".join(
+        [
+            prof + r"\Downloads\x.zip",
+            prof.lower() + r"\a",
+            prof.upper().replace("\\", "/") + "/b",
+            "Name " + user + " / " + user.lower() + " / " + user.upper(),
+        ]
+        + support._user_paths()
+    )
+    got = support.scrub(raw)
+    assert user.lower() not in got.lower(), got
+    assert r"%USERPROFILE%\Downloads\x.zip" in got and "%USERPROFILE%/b" in got, got
+    assert "Name <user> / <user> / <user>" in got, got
+    root, files = (
+        "\\download",
+        [
+            r"\download\Vanilla\a.archive",
+            r"\download\EBB\a.archive",
+            r"\download\b.archive",
+        ],
+    )
+    import core
+
+    assert core.choose_archives(files, root, lambda m: None) == [
+        r"\download\Vanilla\a.archive",
+        r"\download\b.archive",
+    ]
+
+
+def find_button(w, text):
+    import tkinter.ttk as ttk
+
+    for c in w.winfo_children():
+        if isinstance(c, ttk.Button) and c["text"] == text:
+            return c
+        b = find_button(c, text)
+        if b:
+            return b
+    return None
+
+
+def make_support_game(base, real, frameworks):
+    r"""Fake game for the support-report test: archive\pc\content is a JUNCTION to the real one (read only, for the
+    vanilla body shape), a stub body .archive, and with frameworks=True copies of the real ArchiveXL / TweakXL /
+    Codeware / RED4ext DLLs (stubs if the real game has none). -> (game folder, junction)"""
+    import _winapi
+
+    g = os.path.join(base, "Cyberpunk 2077")
+    for d in (r"bin\x64", r"archive\pc\mod", r"r6\tweaks"):
+        os.makedirs(os.path.join(g, d), exist_ok=True)
+    open(os.path.join(g, r"bin\x64\Cyberpunk2077.exe"), "wb").write(b"stub")
+    shutil.copy2(
+        os.path.join(real, r"bin\x64\oo2ext_7_win64.dll"), os.path.join(g, r"bin\x64")
+    )
+    j = os.path.join(g, r"archive\pc\content")
+    if not os.path.exists(j):
+        _winapi.CreateJunction(os.path.join(real, r"archive\pc\content"), j)
+    if frameworks:
+        open(
+            os.path.join(g, r"archive\pc\mod\05_Hyst_Angel_BodyMod.archive"), "wb"
+        ).write(b"stub, not a real archive")
+        for rel in [r for _, r in __import__("support").FRAMEWORKS] + [
+            r"red4ext\RED4ext.dll",
+            r"bin\x64\winmm.dll",
+        ]:
+            os.makedirs(os.path.dirname(os.path.join(g, rel)), exist_ok=True)
+            if os.path.isfile(os.path.join(real, rel)):
+                shutil.copy2(os.path.join(real, rel), os.path.join(g, rel))
+            else:
+                open(os.path.join(g, rel), "wb").write(b"stub")
+    return g, j
+
+
+def remove_junction(j):
+    """Never rmtree through a junction: rmdir removes only the link."""
+    import subprocess
+
+    if os.path.lexists(j):
+        subprocess.run(["cmd", "/c", "rmdir", j], capture_output=True)
+    if os.path.lexists(j):
+        os.rmdir(j)
+
+
+def support_tests(core, gui, a, log, fails):
+    r"""--support DIR --support-outfit OUTFIT (3x): drop outfits on the real window, change body, tick Install, Refit
+    into a fake game in DIR, cause an error, click 'Support report...' and check the report; then restart the
+    window on a second fake game without ArchiveXL etc. and check again (previous session, missing flags)."""
+    import support
+    from tkinter import messagebox
+
+    base = os.path.abspath(opt(a, "--support"))
+    real = opt(a, "--game") or core.find_game()
+    body = dict(x.split("=", 1) for x in opt_all(a, "--body-archive")).get(
+        "angel"
+    ) or core.find_body_archive(real, "angel")
+    odas, outl, peach = opt_all(a, "--support-outfit")[:3]
+    user = os.environ.get("USERNAME") or os.path.basename(os.path.expanduser("~"))
+    gA, jA = make_support_game(os.path.join(base, "Spiel mit Mods ä ö"), real, True)
+    gB, jB = make_support_game(os.path.join(base, "Spiel ohne Mods ü"), real, False)
+    out = os.path.join(base, "Ausgabe ä ö")
+    bogus = os.path.join(base, "kaputt ö.txt")
+    open(bogus, "w").write("not an outfit")
+    log("\n### Support report tests, fake games: %s / %s" % (gA, gB))
+    core.uninstall(core.installed(), lambda m: None)
+    boxes, opened, reports = [], [], []
+    messagebox.showerror = lambda t, m, **k: boxes.append(m)
+    messagebox.showinfo = lambda t, m, **k: boxes.append(m)
+    support.show_in_explorer = opened.append
+    os.startfile = lambda *x, **k: opened.append(x)
+
+    def check(name, cond, detail=""):
+        log(
+            "  %s %s%s"
+            % (
+                "OK  " if cond else "FAIL",
+                name,
+                (" -- %s" % detail) if detail and not cond else "",
+            )
+        )
+        if not cond:
+            fails.append("support: " + name)
+
+    def click_report(app, root):
+        n = len(boxes)
+        find_button(root, "Support report...").invoke()
+        yield lambda: len(boxes) > n
+        p = opened[-1] if opened else None
+        check(
+            "report saved in the output folder and shown in Explorer",
+            p and os.path.dirname(p) == out and os.path.isfile(p),
+            p,
+        )
+        check(
+            "message after saving",
+            boxes[-1].startswith("Saved. Send this file to the mod author."),
+            boxes[-1],
+        )
+        try:
+            reports.append(open(p, encoding="utf-8").read())  # strict UTF-8
+        except Exception as e:
+            check("report opens as UTF-8", False, e)
+
+    def window_a(app, root):
+        app.s.setdefault("body_archive", {})["angel"] = body
+        app.game.set(gA)
+        app.out.set(out)
+        gui.post_drop(root, [odas, outl, bogus])
+        yield lambda: app.lst.size() == 3
+        app.body.set(core.body_name("eve"))
+        app.body.set(core.body_name("angel"))
+        app.inst.set(True)
+        installed = core.installed
+        core.installed = lambda: (
+            1 / 0
+        )  # a bug on purpose: 'Uninstall...' fails inside a Tk callback
+        n = len(boxes)
+        find_button(root, "Uninstall...").invoke()
+        core.installed = installed
+        check(
+            "error on purpose shown as a message",
+            len(boxes) == n + 1 and "went wrong" in boxes[-1],
+            boxes[n:],
+        )
+        find_button(root, "Refit").invoke()
+        yield lambda: not app.busy
+        os.remove(
+            os.path.join(gA, r"r6\tweaks\yellingintothevoid\void_Outlander.yaml")
+        )  # a tweak gone missing
+        dup = os.path.join(gA, r"archive\pc\mod\Vortex Ordner ö")
+        os.makedirs(dup, exist_ok=True)
+        open(os.path.join(dup, "void_Odas_Pants.archive"), "wb").write(b"second copy")
+        gui.post_drop(root, [peach])
+        yield lambda: app.lst.size() == 4
+        app.lst.selection_clear(0, "end")
+        app.lst.selection_set(2)  # the broken input
+        find_button(root, "Remove").invoke()
+        app.log(
+            "Testzeile mit dem Namen: %s %s %s" % (user, user.lower(), user.upper())
+        )
+        yield from click_report(app, root)
+        app.close()  # the real close: writes the session for the next start
+
+    def window_b(app, root):
+        app.game.set(gB)
+        app.out.set(out)
+        w = app.uninstall()
+        items = core.installed()
+        for i, e in enumerate(items):
+            if e["kind"] == "refit" and "outlander" in e["file"].lower():
+                w.lb.select_set(i)
+        w.remove()
+        yield from click_report(app, root)
+
+    try:
+        check("window A ran", gui.drive_script(window_a, log))
+        check("window B (restart) ran", gui.drive_script(window_b, log))
+        if len(reports) != 2:
+            check("two reports written", False, len(reports))
+            return
+        A, B = reports
+        for i, r in enumerate(reports):
+            check(
+                "report %s: no user name or profile path" % "AB"[i],
+                user.lower() not in r.lower(),
+            )
+            check(
+                "report %s: all sections" % "AB"[i],
+                all(
+                    s in r
+                    for s in (
+                        "1. Tool and system",
+                        "2. Settings",
+                        "3. This session",
+                        "3b. Previous session",
+                        "4. Game folder check",
+                        "5. What this tool installed",
+                        "Tool version: " + core.VERSION,
+                    )
+                ),
+            )
+        s = lambda p: support.scrub(p)
+        for want in [
+            "dropped outfit: " + s(odas),
+            "dropped outfit: " + s(outl),
+            "dropped outfit: " + s(bogus),
+            "dropped outfit: " + s(peach),
+            "body set to: Hyst EVE",
+            "body set to: Hyst Angel",
+            "install box ticked",
+            "game folder set to: " + s(gA),
+            "output folder set to: " + s(out),
+            "clicked 'Uninstall...'",
+            "clicked 'Refit'",
+            "Refit started: 3 outfit(s)",
+            "Refit finished",
+            "removed outfit: " + s(bogus),
+            "clicked 'Support report...'",
+            "Testzeile mit dem Namen: <user> <user> <user>",
+        ]:
+            check("report A has: " + want, want in A)
+        this_a = A.split("3b. Previous session")[0]
+        check(
+            "report A: error on purpose with its traceback",
+            "[error] Unexpected error:" in this_a and "ZeroDivisionError" in this_a,
+        )
+        check(
+            "report A: failed outfit as error",
+            "[error] Could not refit this outfit: kaputt ö.txt is not a zip" in this_a,
+        )
+        check(
+            "report A: message box text",
+            "[message] Something went wrong in the window" in this_a,
+        )
+        game_a = A.split("4. Game folder check")[1].split(
+            "5. What this tool installed"
+        )[0]
+        for name, rel in support.FRAMEWORKS + [("RED4ext", r"red4ext\RED4ext.dll")]:
+            v = support.file_version(os.path.join(gA, rel))
+            check(
+                "report A: %s present%s" % (name, " with version %s" % v if v else ""),
+                ("%s present" % rel if name == "RED4ext" else "%s: present" % name)
+                in game_a
+                and (not v or v in game_a),
+            )
+        check(
+            "report A: RED4ext loader winmm.dll", "loader bin\\x64\\winmm.dll" in game_a
+        )
+        check(
+            "report A: body mod found",
+            "05_Hyst_Angel_BodyMod.archive (Hyst Angel)" in game_a,
+        )
+        check(
+            "report A: duplicate flagged",
+            any(
+                l.startswith("  DUPLICATE:")
+                and "Vortex Ordner ö\\void_Odas_Pants.archive" in l
+                for l in game_a.splitlines()
+            ),
+        )
+
+        def block(inp):
+            i = game_a.find("Outfit: " + s(inp))
+            return game_a[i : game_a.find("\n\n", i)] if i >= 0 else ""
+
+        bo, bl, bp, bb = block(odas), block(outl), block(peach), block(bogus)
+        check(
+            "report A: Odas original/xl/tweak/refit present",
+            "(refit this session: " in bo
+            and "original void_Odas_Pants.archive: present" in bo
+            and ".xl void_Odas_Pants.xl: present" in bo
+            and r"tweak r6\tweaks\yellingintothevoid\void_Odas_Pants.yaml: present"
+            in bo
+            and "refit in the game: MISSING" not in bo
+            and "refit in the output folder: none" not in bo,
+            bo,
+        )
+        check(
+            "report A: Outlander tweak missing, rest present",
+            "original void_Outlander.archive: present" in bl
+            and ".xl void_Outlander.xl: present" in bl
+            and r"tweak r6\tweaks\yellingintothevoid\void_Outlander.yaml: MISSING" in bl
+            and "refit in the game: MISSING" not in bl,
+            bl,
+        )
+        check(
+            "report A: Peachu (not refit) original + xl + refit missing",
+            "original Peachu_SchoolShorts-VANILLA.archive: MISSING" in bp
+            and ".xl Peachu_SchoolShorts-VANILLA.xl: MISSING" in bp
+            and "refit in the game: MISSING (none found)" in bp
+            and "refit this session" not in bp,
+            bp,
+        )
+        check(
+            "report A: broken input explained",
+            "refit tried this session, no file made" in bb
+            and "could not look inside the download" in bb,
+            bb,
+        )
+        inst_a = A.split("5. What this tool installed")[1]
+        check(
+            "report A: install list has refits and originals",
+            inst_a.count("Refit: ") == 2 and "Original outfit: " in inst_a,
+            inst_a,
+        )
+        prev_b = B.split("3b. Previous session")[1].split("4. Game folder check")[0]
+        check(
+            "report B: previous session = window A",
+            "dropped outfit: " + s(odas) in prev_b
+            and "Refit finished" in prev_b
+            and "ZeroDivisionError" in prev_b
+            and "window closed" in prev_b,
+        )
+        check(
+            "report B: this session has the uninstall pick",
+            "uninstall picked: " in B.split("3b.")[0]
+            and "Outlander" in B.split("3b.")[0],
+        )
+        game_b = B.split("4. Game folder check")[1].split(
+            "5. What this tool installed"
+        )[0]
+        for name, _ in support.FRAMEWORKS:
+            check("report B: %s missing" % name, "%s: MISSING" % name in game_b)
+        check(
+            "report B: RED4ext missing",
+            r"red4ext\RED4ext.dll MISSING" in game_b
+            and "winmm.dll / version.dll MISSING" in game_b,
+        )
+        check(
+            "report B: no body mod",
+            "Body mods found in archive\\pc\\mod: none" in game_b,
+        )
+        check(
+            "report B: Outlander refit gone from the install list",
+            "Refit: " in B.split("5. What this tool installed")[1]
+            and "AngelRefit_void_Outlander"
+            not in B.split("5. What this tool installed")[1].replace("!!!", ""),
+        )
+        log("  example report: %s" % opened[0])
+    finally:
+        core.uninstall(core.installed(), lambda m: None)
+        remove_junction(jA)
+        remove_junction(jB)
+        check(
+            "junctions removed, real content untouched",
+            not os.path.lexists(jA)
+            and not os.path.lexists(jB)
+            and os.path.isdir(os.path.join(real, r"archive\pc\content")),
+        )
+
+
 def main(a):
     if opt(a, "--home"):
         os.environ["BODYREFIT_HOME"] = os.path.abspath(opt(a, "--home"))
@@ -470,6 +851,12 @@ def main(a):
     except AssertionError as e:
         log("FAIL original-outfit install plan: %s" % (e,))
         fails.append("original plan")
+    try:
+        check_scrub()
+        log("support report privacy scrub OK")
+    except AssertionError as e:
+        log("FAIL support report privacy scrub: %s" % e)
+        fails.append("scrub")
     out = os.path.abspath(
         opt(a, "--out") or tempfile.mkdtemp(prefix="bodyrefit_selftest_")
     )
@@ -574,5 +961,13 @@ def main(a):
         except Exception:
             log("FAIL: install tests crashed:\n" + traceback.format_exc())
             fails.append("gui-install")
+    if opt(a, "--support"):
+        try:
+            import gui
+
+            support_tests(core, gui, a, log, fails)
+        except Exception:
+            log("FAIL: support report tests crashed:\n" + traceback.format_exc())
+            fails.append("support")
     log("\nSELFTEST %s" % ("PASSED" if not fails else "FAILED: %s" % fails))
     return 1 if fails else 0
