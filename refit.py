@@ -1,18 +1,21 @@
 r"""Refit one clothing mod to another body and pack the result as its own .archive.
 
 Flow: WolvenKit unbundle -> find ArchiveXL "{body}" mesh families in .ent/.app -> per mesh: WolvenKit export glb ->
-move the vertices with the vanilla->target body displacement field (only POSITION bytes change) -> WolvenKit import
+move the vertices with the source->target body displacement field (only POSITION bytes change) -> WolvenKit import
 -> rebuild any mesh whose big buffers WolvenKit wrote badly -> WolvenKit pack -> final buffer + index-CRC check.
 A mesh WolvenKit can't read at all (old file format) goes through OwnMesh instead: positions decoded from and
 written back into its own render buffer, no WolvenKit import.
 
-- Dynamic meshes ("*path_{body}.mesh" in .ent/.app): <path>_base_body.mesh is refit and written as NEW
-  <path>_<body>.mesh. Nothing of the original mod is overridden; ArchiveXL picks it when that body is installed.
+Source and target are any two bodies of bodies.json (vanilla, Angel, EVE); they share the vanilla topology, so the
+field goes straight from one to the other (no step over vanilla, which would add the error and the push-out twice).
+- Dynamic meshes ("*path_{body}.mesh" in .ent/.app): <path>_<source xl>.mesh is refit and written as NEW
+  <path>_<target xl>.mesh (xl name: vanilla = base_body, Angel = angel). Nothing of the original mod is overridden;
+  ArchiveXL picks it when that body is installed (base_body = no body mod).
 - Static meshes (no {body} family): refit in place, same depot path; the output is named "!!!<Body>Refit_*.archive"
   so it loads before the mod's own archive and wins.
-The source shape is always the vanilla body. Meshes that can't be read, are not worn on the body (glasses, props),
-are male, or already have a version for the target body are
-skipped and listed. A mesh WolvenKit can't re-import is dropped; the rest of the outfit still gets refit.
+Meshes that can't be read, are not worn on the body (glasses, props), are male, or already have a version for the
+target body are skipped and listed. A mesh WolvenKit can't re-import is dropped; the rest of the outfit still gets
+refit.
 """
 
 import base64, glob, json, os, re, shutil, struct
@@ -21,7 +24,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 import rdar
-from core import ToolError, body_name, run
+from core import ToolError, body_name, run, xl_name
 
 HELPER = re.compile(
     r"(save_material|material_mesh|_materials?\.mesh$|_shadow\.mesh$|[\\/_]props?[\\/_])",
@@ -161,10 +164,11 @@ _TREES = {}
 
 
 def far_from_body(pts, cages):
-    """True for glasses, hats, props: fewer than 20 vertices within 3 cm of the vanilla or target body. They look
+    """True for glasses, hats, props: fewer than 20 vertices within 3 cm of the source or target body. They look
     the same on every body, so they are left alone.
-    ponytail: no 'which body was this made for' guess. Angel and EVE are too close to vanilla for a distance test to
-    tell them apart reliably (tested 2026-11), so the source is always the vanilla body; users add vanilla downloads."""
+    ponytail: no 'which body was this made for' guess from the geometry. Angel and EVE are too close to vanilla for a
+    distance test to tell them apart reliably (tested 2026-11); the user picks the source body (pre-filled from the
+    file name)."""
     near = np.zeros(len(pts), bool)
     for c in cages:
         if c not in _TREES:
@@ -626,10 +630,12 @@ def recover_names(src, arcs):
 
 
 def refit_mod(
-    arcs, name, work, out, tgt, cages, wk, game, log, progress=lambda f: None
+    arcs, name, work, out, src_body, tgt, cages, wk, game, log, progress=lambda f: None
 ):
-    """arcs: the outfit's .archive files. -> path of the written refit archive, or None if nothing needed a refit.
+    """arcs: the outfit's .archive files, made for body src_body; refit to body tgt (body tags; cages: {tag: glbs}).
+    -> path of the written refit archive, or None if nothing needed a refit.
     Raises ToolError when nothing could be refit or the final safety check fails."""
+    sx, tx = xl_name(src_body), xl_name(tgt)
     src, glbd, raw, pack = (
         os.path.join(work, x) for x in ("src", "glb", "raw", "pack")
     )
@@ -689,7 +695,7 @@ def refit_mod(
         if re.search(r"\{(?!body\})", pat):
             skipped.append((pat, "uses other ArchiveXL tokens"))
             continue
-        s, t = pat.replace("{body}", "base_body"), pat.replace("{body}", tgt)
+        s, t = pat.replace("{body}", sx), pat.replace("{body}", tx)
         fam = re.escape(pat).replace(r"\{body\}", r"[a-z0-9_]+")
         covered |= {k for k in meshes if re.fullmatch(fam, k)}
         if t in meshes:
@@ -697,7 +703,7 @@ def refit_mod(
         elif s in meshes:
             jobs.append((s, t))
         else:
-            skipped.append((pat, "no base_body mesh to start from"))
+            skipped.append((pat, "no %s mesh to start from" % sx))
     for k in meshes:
         stem = os.path.splitext(os.path.basename(k))[0]
         if k in covered or HELPER.search(k):
@@ -706,9 +712,9 @@ def refit_mod(
             skipped.append((k, "male mesh"))
             continue
         if stem.endswith(
-            "_base_body"
+            "_" + sx
         ):  # family whose {body} path is only stored hashed: add the sibling
-            t = k[: -len("base_body") - 5] + tgt + ".mesh"
+            t = k[: -len(sx) - 5] + tx + ".mesh"
             if t not in meshes:
                 jobs.append((k, t))
             continue
@@ -720,7 +726,10 @@ def refit_mod(
             log("  skipped %s: %s" % (os.path.basename(s), why))
         log("Nothing to refit in this mod.")
         return None
-    log("Refitting %d mesh(es) to %s ..." % (len(jobs), body_name(tgt)))
+    log(
+        "Refitting %d mesh(es) from %s to %s ..."
+        % (len(jobs), body_name(src_body), body_name(tgt))
+    )
     done, glbs = [], {}
     for n, (s, t) in enumerate(jobs):
         progress(0.8 * n / len(jobs))
@@ -738,7 +747,7 @@ def refit_mod(
                 continue
         stem = os.path.splitext(os.path.basename(s))[0]
         if not BODY_SUFFIX.search(stem) and far_from_body(
-            pts, (cages["van"], cages[tgt])
+            pts, (cages[src_body], cages[tgt])
         ):
             skipped.append((s, "not worn on the body (same on every body)"))
             continue
@@ -746,7 +755,7 @@ def refit_mod(
         os.makedirs(os.path.join(raw, tdir), exist_ok=True)
         os.makedirs(os.path.join(pack, tdir), exist_ok=True)
         if own:
-            Q, pushed = move(pts, cages["van"], cages[tgt])
+            Q, pushed = move(pts, cages[src_body], cages[tgt])
             try:
                 data = own_refit(own, from_glb_space(Q))
             except Exception as e:
@@ -766,7 +775,7 @@ def refit_mod(
         os.makedirs(os.path.dirname(g2), exist_ok=True)
         shutil.copy(g, g2)
         glbs[t] = (g2, tglb)
-        nv, pushed = refit_glb(g, tglb, cages["van"], cages[tgt])
+        nv, pushed = refit_glb(g, tglb, cages[src_body], cages[tgt])
         log(
             "  %s: %d vertices moved, %d pushed out of the skin"
             % (os.path.basename(t), nv, pushed)
@@ -783,7 +792,11 @@ def refit_mod(
         for s, t in list(
             done
         ):  # a mesh WolvenKit could not re-import is still the unrefit copy -> drop it
-            if t in glbs and open(os.path.join(pack, t), "rb").read() == open(meshes[s], "rb").read():
+            if (
+                t in glbs
+                and open(os.path.join(pack, t), "rb").read()
+                == open(meshes[s], "rb").read()
+            ):
                 os.remove(os.path.join(pack, t))
                 done.remove((s, t))
                 skipped.append((s, "WolvenKit can't write this mesh back"))

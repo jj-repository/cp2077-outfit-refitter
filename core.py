@@ -25,7 +25,7 @@ if (
     except OSError:
         DATA = _OLD_DATA
 
-VERSION = "1.4"
+VERSION = "1.5"
 
 
 def documents_dir():
@@ -89,6 +89,24 @@ def bodies():
 
 def body_name(tag):
     return bodies()["bodies"][tag]["name"]
+
+
+def xl_name(tag):
+    """The ArchiveXL {body} name of a body: vanilla = base_body, Angel = angel, ..."""
+    return bodies()["bodies"][tag].get("xl", tag)
+
+
+def hint_rx(tag):
+    """Words in a file name that mean 'made for this body'. A hint in lower case matches any case, one with capitals
+    only exactly ('EVE' = the body, 'Eve' = often just a character's name). ponytail: 'vanilla' matches anywhere
+    (as in 1.0-1.4, e.g. 'VanillaButt'); other hints only as a whole word, so 'eve' never matches 'Evelyn'."""
+    words = "|".join(
+        "(?i:%s)" % re.escape(w) if w.islower() else re.escape(w)
+        for w in bodies()["bodies"][tag].get("hints", [tag])
+    )
+    if tag == "vanilla":
+        return re.compile(words)
+    return re.compile(r"(^|[^a-zA-Z])(%s)([^a-zA-Z]|$)" % words)
 
 
 # ---------------- settings ----------------
@@ -352,7 +370,7 @@ def find_body_archive(game, tag):
     for f in sorted(os.listdir(md)) if os.path.isdir(md) else []:
         if any(
             fnmatch.fnmatch(f.lower(), p.lower())
-            for p in cfg["bodies"][tag]["archives"]
+            for p in cfg["bodies"][tag].get("archives", [])
         ):
             p = os.path.join(md, f)
             try:
@@ -375,12 +393,79 @@ def check_body_archive(path):
         )
 
 
+def check_body_file(path, tag):
+    """Quick check of a body file the user picked (the window waits for it). An .archive must hold the body meshes;
+    a download (zip / 7z / rar / folder) is only looked into on Refit, see body_archive_in()."""
+    low = path.lower()
+    if os.path.isdir(path):
+        return
+    if low.endswith(".zip"):
+        with zipfile.ZipFile(path) as z:
+            if not any(n.lower().endswith(".archive") for n in z.namelist()):
+                raise ToolError(
+                    "%s has no .archive file inside. Pick the %s download or its main .archive."
+                    % (os.path.basename(path), body_name(tag))
+                )
+    elif low.endswith((".7z", ".rar")):
+        if not find_7z():
+            raise ToolError(
+                "To read a .7z or .rar, install 7-Zip (7-zip.org), or unpack the download yourself and pick "
+                "the body mod's .archive instead."
+            )
+    elif low.endswith(".archive"):
+        check_body_archive(path)
+    else:
+        raise ToolError(
+            "%s is not a zip, 7z, rar or .archive." % os.path.basename(path)
+        )
+
+
+def body_archive_in(path, dest, tag):
+    """The body mod's .archive: path itself, or the one inside a body mod download (zip / 7z / rar / folder; only its
+    .archive files are extracted, into dest). Never installed, only read for the body shape."""
+    if not os.path.isdir(path) and path.lower().endswith(".archive"):
+        return path
+    root = unpack(path, dest, "*.archive")
+    want = {rdar.fnv(m) for m in bodies()["meshes"]}
+    found = []
+    for a in sorted(glob.glob(os.path.join(root, "**", "*.archive"), recursive=True)):
+        try:
+            if want <= set(rdar.Rdar(a).hashes()):
+                found.append(a)
+        except Exception:  # a broken archive is just not the body
+            pass
+    pats = bodies()["bodies"][tag].get("archives", [])
+    named = [
+        a
+        for a in found
+        if any(fnmatch.fnmatch(os.path.basename(a).lower(), p.lower()) for p in pats)
+    ] or found
+    if not named:
+        raise ToolError(
+            "No %s body file found in %s. Pick the body mod's download or its main .archive."
+            % (body_name(tag), os.path.basename(path))
+        )
+    kinds = sorted({os.path.basename(a) for a in named}, key=str.lower)
+    if len(kinds) > 1:
+        raise ToolError(
+            "%s has several body files (%s). Unpack it and pick the one you use with 'Body file...'."
+            % (os.path.basename(path), ", ".join(kinds))
+        )
+    return max(named, key=os.path.getsize)
+
+
 def _stamp(paths):
-    """Changes when a source file changes (a folder counts as its .archive files)."""
+    """Changes when a source file changes (a folder counts as its .archive files: the top level, or every
+    subfolder when the top level has none, as in an unpacked body mod download)."""
     files = []
     for p in paths:
         files += (
-            sorted(glob.glob(os.path.join(p, "*.archive"))) if os.path.isdir(p) else [p]
+            (
+                sorted(glob.glob(os.path.join(p, "*.archive")))
+                or sorted(glob.glob(os.path.join(p, "**", "*.archive"), recursive=True))
+            )
+            if os.path.isdir(p)
+            else [p]
         )
     return ";".join(
         "%s|%d|%d" % (os.path.basename(f), os.path.getsize(f), int(os.path.getmtime(f)))
@@ -388,31 +473,44 @@ def _stamp(paths):
     )
 
 
+def cage_dir(tag):
+    """DATA\\cages\\<tag>; the vanilla shape keeps its 1.0-1.4 folder name 'van' (no re-read after the update)."""
+    return os.path.join(DATA, "cages", "van" if tag == "vanilla" else tag)
+
+
 def ensure_cages(key, sources, game, wk, log):
-    """Body shape glbs for key ('van' or a body tag) in DATA\\cages\\<key>, extracted with WolvenKit from sources
-    (the base game's content folder, or the user's body mod archive). Re-extracted when the source file changes."""
-    d = os.path.join(DATA, "cages", key)
+    """Body shape glbs for body tag key in cage_dir(key), extracted with WolvenKit from sources (the base game's
+    content folder, or the user's body mod: an installed .archive or a picked download). Re-extracted when the source
+    file changes."""
+    d = cage_dir(key)
     stamp = _stamp(sources)
     glbs = sorted(glob.glob(os.path.join(d, "*.glb")))
     try:
-        if len(glbs) == 3 and open(os.path.join(d, "source.txt")).read() == stamp:
+        if (
+            len(glbs) == 3
+            and open(os.path.join(d, "source.txt"), encoding="utf-8").read() == stamp
+        ):
             return ";".join(glbs)
-    except OSError:
+    except (OSError, ValueError):
         pass
     log(
-        "Reading the %s body shape from your installed files (one time, about a minute) ..."
-        % ("vanilla" if key == "van" else body_name(key))
+        "Reading the %s body shape from your files (one time, about a minute) ..."
+        % ("vanilla" if key == "vanilla" else body_name(key))
     )
     shutil.rmtree(d, ignore_errors=True)
     tmp = tempfile.mkdtemp(prefix="cage_", dir=_work_root())
     try:
         meshes = bodies()["meshes"]
         rx = "^(" + "|".join(re.escape(m) for m in meshes) + ")$"
+        ub = os.path.join(tmp, "x")
         for s in sources:
-            run([wk, "unbundle", s, "-o", tmp, "-r", rx], game)
+            if not bodies()["bodies"][key].get("game"):
+                s = body_archive_in(s, os.path.join(tmp, "dl"), key)
+                check_body_archive(s)
+            run([wk, "unbundle", s, "-o", ub, "-r", rx], game)
         os.makedirs(d)
         for m in meshes:
-            mp = os.path.join(tmp, m)
+            mp = os.path.join(ub, m)
             if not os.path.isfile(mp):
                 raise ToolError(
                     "Could not find %s in %s."
@@ -422,7 +520,7 @@ def ensure_cages(key, sources, game, wk, log):
         glbs = sorted(glob.glob(os.path.join(d, "*.glb")))
         if len(glbs) != 3:
             raise ToolError("WolvenKit could not export the body shape.")
-        open(os.path.join(d, "source.txt"), "w").write(stamp)
+        open(os.path.join(d, "source.txt"), "w", encoding="utf-8").write(stamp)
         return ";".join(glbs)
     except Exception:
         shutil.rmtree(d, ignore_errors=True)
@@ -483,20 +581,23 @@ def outfit_name(path):
     return re.sub(r"\W+", "_", shown_name(path)).strip("_")[:60] or "outfit"
 
 
-def prepare_input(path, dest, log):
-    """zip/7z/rar/folder/.archive -> list of the .archive files to refit (copied/extracted under dest).
-    Downloads with several body versions (Vanilla / EBB / RB folders with the same files) -> the Vanilla one."""
-    os.makedirs(dest, exist_ok=True)
-    low = path.lower()
+def unpack(path, dest, only=None):
+    """zip / 7z / rar -> extracted into dest; a folder is used as it is. only: e.g. '*.archive' to extract just those
+    files. -> the folder to look in."""
     if os.path.isdir(path):
-        root = path
-    elif low.endswith(".archive"):
-        shutil.copy(path, dest)
-        variant_warning([shown_name(path)], log)
-        return [os.path.join(dest, os.path.basename(path))]
-    elif low.endswith(".zip"):
-        zipfile.ZipFile(path).extractall(dest)
-        root = dest
+        return path
+    low = path.lower()
+    os.makedirs(dest, exist_ok=True)
+    if low.endswith(".zip"):
+        with zipfile.ZipFile(path) as z:
+            z.extractall(
+                dest,
+                [
+                    n
+                    for n in z.namelist()
+                    if not only or fnmatch.fnmatch(os.path.basename(n).lower(), only)
+                ],
+            )
     elif low.endswith((".7z", ".rar")):
         z = find_7z()
         if not z:
@@ -504,37 +605,99 @@ def prepare_input(path, dest, log):
                 "To open .7z or .rar files, install 7-Zip (7-zip.org), or unpack the download yourself "
                 "and add the folder instead."
             )
-        run([z, "x", "-y", "-o" + dest, path])
-        root = dest
+        run([z, "x", "-y", "-o" + dest, path] + ([only, "-r"] if only else []))
     else:
         raise ToolError(
             "%s is not a zip, 7z, rar, folder or .archive." % os.path.basename(path)
         )
+    return dest
+
+
+def prepare_input(path, dest, log, src="vanilla"):
+    """zip/7z/rar/folder/.archive -> list of the .archive files to refit (copied/extracted under dest).
+    Downloads with several body versions (Vanilla / EBB / Angel folders with the same files) -> the one for src
+    (the body the outfit is made for), else the vanilla one. Warns when the chosen files look made for another body."""
+    os.makedirs(dest, exist_ok=True)
+    if not os.path.isdir(path) and path.lower().endswith(".archive"):
+        shutil.copy(path, dest)
+        variant_warning([shown_name(path)], log, src)
+        return [os.path.join(dest, os.path.basename(path))]
+    root = unpack(path, dest)
     arcs = sorted(glob.glob(os.path.join(root, "**", "*.archive"), recursive=True))
     if not arcs:
         raise ToolError("No .archive file found in %s." % os.path.basename(path))
-    chosen = choose_archives(arcs, root, log)
-    if len(chosen) == len(arcs):  # the download has no other version to pick instead
-        variant_warning([shown_name(path)] + [os.path.relpath(a, root) for a in chosen], log)
+    chosen = choose_archives(arcs, root, log, src)
+    # the chosen files' own paths say more than the download's name, so they are looked at first
+    variant_warning(
+        [os.path.relpath(a, root) for a in chosen] + [shown_name(path)], log, src
+    )
     return chosen
 
 
-def variant_warning(texts, log):
-    """Warn (never block) when the outfit's name or folders say it was made for another body."""
-    if any("vanilla" in t.lower() for t in texts):
+REFIT_NAME = re.compile(
+    r"^!*([a-z]+)Refit_", re.I
+)  # this tool's own output: AngelRefit_x, !!!EveRefit_x
+
+
+def guess_body(texts):
+    """The body an outfit looks made for, from file / folder names: -> (word, body tag) for a body this tool knows,
+    (word, None) for another body (EBB, RB, ...), None when the names don't say. Earlier texts win."""
+    tags = bodies()["bodies"]
+    for t in texts:
+        m = REFIT_NAME.match(os.path.basename(t))
+        if m and m.group(1).lower() in tags:
+            return m.group(1), m.group(1).lower()
+    for t in texts:  # the body word that comes first in a name wins ('EVE Body - Full Vanilla Refit' = EVE)
+        hits = [
+            (m.start(2 if m.re.groups else 0), m, tag)
+            for tag in tags
+            for m in [hint_rx(tag).search(t)]
+            if m
+        ]
+        if hits:
+            _, m, tag = min(hits, key=lambda h: h[0])
+            return m.group(2 if m.re.groups else 0), tag
+    for t in texts:  # another body; 'Eve' / 'angel' that aren't hints above (e.g. a character's name) don't count
+        for m in VARIANT_BODY.finditer(t):
+            if m.group(2).lower() not in tags:
+                return m.group(2), None
+    return None
+
+
+def variant_warning(texts, log, src="vanilla"):
+    """Warn (never block) when the outfit's name or folders say it was made for another body than src."""
+    g = guess_body(texts)
+    if not g or g[1] == src:
         return
-    m = next(filter(None, (VARIANT_BODY.search(t) for t in texts)), None)
-    if m:
+    word, tag = g
+    if tag is None and src == "vanilla":
         log(
             "This looks like a version made for another body (%s). Refits work best from the outfit's normal "
-            "(vanilla) version — download that one if the outfit has it." % m.group(2)
+            "(vanilla) version — download that one if the outfit has it." % word
+        )
+    elif tag is None:
+        log(
+            "This looks like a version made for another body (%s), not for %s. This tool can't refit from %s "
+            "yet; use the outfit's vanilla or %s version if it has one."
+            % (word, body_name(src), word, body_name(src))
+        )
+    else:
+        log(
+            "Warning: this outfit looks made for %s ('%s' in its name), but 'Outfit made for' is set to %s. "
+            "If the name is right, set 'Outfit made for' to %s and refit again — otherwise the outfit is reshaped "
+            "from the wrong body and won't fit."
+            % (body_name(tag), word, body_name(src), body_name(tag))
         )
 
 
-def choose_archives(arcs, root, log):
-    """The .archive files to use out of a download's (paths under root, sorted). Several body versions -> the
-    vanilla one. Works on names only (the support report uses it on a zip's file list)."""
+def choose_archives(arcs, root, log, src="vanilla"):
+    """The .archive files to use out of a download's (paths under root, sorted). Several body versions -> the one
+    for src, else the vanilla one. Works on names only (the support report uses it on a zip's file list)."""
     arcs = sorted(arcs)
+    want = hint_rx(src)
+    others = [hint_rx(t) for t in bodies()["bodies"] if t != src]
+    other_body = lambda s: VARIANT_BODY.search(s) or any(r.search(s) for r in others)
+    label = "vanilla" if src == "vanilla" else body_name(src)
     groups = {}
     for a in arcs:
         groups.setdefault(os.path.basename(a).lower(), []).append(a)
@@ -548,8 +711,9 @@ def choose_archives(arcs, root, log):
             rel(a)
         )  # same file name: only the folder tells the versions apart
         van = (
-            [a for a in same if re.search("vanilla", folder(a), re.I)]
-            or [a for a in same if not VARIANT_BODY.search(folder(a))]
+            [a for a in same if want.search(folder(a))]
+            or [a for a in same if re.search("vanilla", folder(a), re.I)]
+            or [a for a in same if not other_body(folder(a))]
             or same
         )
         chosen.append(van[0])
@@ -563,16 +727,20 @@ def choose_archives(arcs, root, log):
         )
     # different names per body (Vanilla\a.archive + EBB\a_ebb.archive, or a_vanilla / a_rb side by side)
     rels = {a: os.path.relpath(a, root) for a in chosen}
-    if any(re.search("vanilla", r, re.I) for r in rels.values()):
-        drop = [
-            a
-            for a, r in rels.items()
-            if VARIANT_BODY.search(r) and not re.search("vanilla", r, re.I)
-        ]
+    if not any(
+        want.search(r) for r in rels.values()
+    ):  # no version for src: fall back to the vanilla one
+        want, label = hint_rx("vanilla"), "vanilla"
+        other_body = lambda s: (
+            VARIANT_BODY.search(s)
+            or any(hint_rx(t).search(s) for t in bodies()["bodies"] if t != "vanilla")
+        )
+    if any(want.search(r) for r in rels.values()):
+        drop = [a for a, r in rels.items() if other_body(r) and not want.search(r)]
         for a in drop:
             log(
-                "Skipping %s (a version for another body; the vanilla one is used)."
-                % rels[a]
+                "Skipping %s (a version for another body; the %s one is used)."
+                % (rels[a], label)
             )
         chosen = [a for a in chosen if a not in drop]
     return chosen
@@ -769,26 +937,61 @@ def uninstall(entries, log):
 # ---------------- the whole job ----------------
 
 
-def setup(game, tag, log, progress=lambda f: None, body_archive=None, wk_existing=None):
-    """Everything needed before refitting: -> (wolvenkit exe, {cage key: glb list})."""
+def body_source(game, tag, body_files=None):
+    """Where a body's shape is read from: [the game's content folder] for vanilla, else [the body file the user picked
+    (an .archive or a download), or the body mod's .archive installed in the game]. None = not found."""
+    if bodies()["bodies"][tag].get("game"):
+        return vanilla_sources(game)
+    p = (body_files or {}).get(tag)
+    if p and os.path.exists(p):
+        return [p]
+    p = find_body_archive(game, tag)
+    return [p] if p else None
+
+
+def setup(
+    game, src, tgt, log, progress=lambda f: None, body_files=None, wk_existing=None
+):
+    """Everything needed before refitting from body src to body tgt: -> (wolvenkit exe, {body tag: glb list}).
+    body_files: {body tag: file the user picked}."""
     if not is_game_dir(game):
         raise ToolError(
             "Please choose your Cyberpunk 2077 game folder (the one with the 'bin' and 'archive' folders)."
         )
+    if src == tgt:
+        raise ToolError(
+            "'Outfit made for' and 'Your body mod' are both %s, so there is nothing to refit. Set 'Outfit made for' "
+            "to the body the outfit was made for." % body_name(src)
+        )
     ensure_oodle(game)
     wk = ensure_wolvenkit(log, progress, wk_existing)
-    body_archive = body_archive or find_body_archive(game, tag)
-    if not body_archive:
+    found = {t: body_source(game, t, body_files) for t in (src, tgt)}
+    if not found[tgt]:
         raise ToolError(
             "%s is not installed in the game (archive\\pc\\mod). Install the body mod first (%s), "
-            "or pick its .archive file with 'Body file...'."
-            % (body_name(tag), bodies()["bodies"][tag]["page"])
+            "or pick its download or .archive file with 'Body file...' next to 'Your body mod'."
+            % (body_name(tgt), bodies()["bodies"][tgt].get("page", ""))
         )
-    check_body_archive(body_archive)
-    cages = {
-        "van": ensure_cages("van", vanilla_sources(game), game, wk, log),
-        tag: ensure_cages(tag, [body_archive], game, wk, log),
-    }
+    if not found[src]:
+        raise ToolError(
+            "The outfit is made for %s, so the tool needs the %s body shape, but %s is not installed in the game. "
+            "Click 'Body file...' next to 'Outfit made for' and pick the %s download (zip / 7z / rar) or its "
+            ".archive%s. It is only read, never installed."
+            % (
+                body_name(src),
+                body_name(src),
+                body_name(src),
+                body_name(src),
+                " (%s)" % bodies()["bodies"][src]["page"]
+                if bodies()["bodies"][src].get("page")
+                else "",
+            )
+        )
+    cages = {}
+    for t in (src, tgt):
+        if found[t][0].lower().endswith(".archive"):
+            check_body_archive(found[t][0])
+        cages[t] = ensure_cages(t, found[t], game, wk, log)
     return wk, cages
 
 
@@ -803,18 +1006,22 @@ def run_batch(
     log,
     progress=lambda f: None,
     do_install=False,
-    body_archive=None,
+    body_files=None,
     wk_existing=None,
     cancel=None,
+    src="vanilla",
 ):
-    """Refit every input for body tag. -> list of (input, output archive or None, message, original missing).
+    """Refit every input from body src (the body the outfits are made for) to body tag. -> list of (input, output
+    archive or None, message, original missing).
     original missing: True when the original outfit is not in the game (and was not installed now).
+    body_files: {body tag: body file the user picked}.
     cancel: a threading.Event; once set, nothing more is installed and no further outfit is started."""
     import refit
 
     cancel = cancel or threading.Event()
     clean_old_work()
-    wk, cages = setup(game, tag, log, progress, body_archive, wk_existing)
+    wk, cages = setup(game, src, tag, log, progress, body_files, wk_existing)
+    log("Refitting from %s to %s." % (body_name(src), body_name(tag)))
     os.makedirs(out_dir, exist_ok=True)
     results = []
     for i, inp in enumerate(inputs):
@@ -826,12 +1033,13 @@ def run_batch(
         log("=== %s ===" % os.path.basename(inp))
         work = tempfile.mkdtemp(prefix="job_", dir=_work_root())
         try:
-            arcs = prepare_input(inp, os.path.join(work, "in"), log)
+            arcs = prepare_input(inp, os.path.join(work, "in"), log, src)
             res = refit.refit_mod(
                 arcs,
                 name,
                 work,
                 out_dir,
+                src,
                 tag,
                 cages,
                 wk,

@@ -1,7 +1,10 @@
 r"""Outfit Refitter: refit Cyberpunk 2077 clothing mods to the body mod you use.
 
 outfit_refitter.py [outfit ...]                      open the window (files dropped on the exe are pre-added)
-outfit_refitter.py --refit OUTFIT... --body angel [--install] [--out DIR] [--game DIR]
+outfit_refitter.py --refit OUTFIT... --body angel [--from vanilla] [--body-file TAG=FILE] [--install] [--out DIR]
+                   [--game DIR]
+    --body: the body to refit to, --from: the body the outfit is made for (vanilla, angel, eve; default vanilla),
+    --body-file: a body's .archive or download when it is not installed in the game.
 outfit_refitter.py --selftest ...                    see selftest.py
 outfit_refitter.py --version
 In the windowed .exe, --refit / --selftest / --version output goes to %TEMP%\OutfitRefitter_console.log.
@@ -14,15 +17,19 @@ def cli_refit(a):
     import core
     from selftest import opt
 
+    from selftest import opt_all
+
     s = core.load_settings()
     game = opt(a, "--game") or s.get("game") or core.find_game()
     tag = opt(a, "--body", "angel")
+    valued = ("--game", "--body", "--out", "--from", "--body-file")
     files = [
         x
         for i, x in enumerate(a)
-        if not x.startswith("--")
-        and (i == 0 or a[i - 1] not in ("--game", "--body", "--out"))
+        if not x.startswith("--") and (i == 0 or a[i - 1] not in valued)
     ]
+    body_files = dict(s.get("body_archive", {}))
+    body_files.update(x.split("=", 1) for x in opt_all(a, "--body-file"))
     res = core.run_batch(
         files,
         tag,
@@ -30,6 +37,8 @@ def cli_refit(a):
         opt(a, "--out") or core.DEFAULT_OUT,
         print,
         do_install="--install" in a,
+        body_files=body_files,
+        src=opt(a, "--from", "vanilla"),
     )
     return 0 if all(r[1] or r[2] == "nothing to refit" for r in res) else 1
 

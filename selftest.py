@@ -3,7 +3,15 @@ then refit real outfit archives, run the safety check and list the output. Optio
 with refits you trust (e.g. ones made by hand).
 
   outfit_refitter.py --selftest [--home DIR] [--out DIR] [--game DIR] [--wolvenkit DIR]
-                   [--body-archive TAG=FILE ...] [--case TAG=OUTFIT[=REFERENCE.archive] ...] [--gui]
+                   [--body-archive TAG=FILE ...] [--case [SRC>]TAG=OUTFIT[=REFERENCE.archive[=exact]] ...] [--gui]
+
+--case: refit OUTFIT from body SRC (default vanilla) to TAG; with a reference, print the vertex distance per mesh;
+    'exact' = fail unless it is 0 (an unchanged refit).
+--compare A=B: vertex distance between two archives (information).
+--roundtrip TAG=OUTFIT[=MAX_MEAN_MM]: vanilla -> TAG -> vanilla, compared with the vanilla original.
+--gui-source DIR --gui-source-outfit ANGEL_OUTFIT [--gui-source-body eve=DOWNLOAD]: 'Outfit made for' tests in the
+    real window (pre-fill, wrong source, same body twice, missing source body, body from a download, 'Body file...',
+    closing mid-refit).
 
 --home: data folder to use instead of %LOCALAPPDATA%\OutfitRefitter (fresh folder = real first run).
 --gui: also open the window for two seconds and close it (proves it starts).
@@ -59,14 +67,19 @@ def positions(wk, game, arch, tmp):
 
 def compare(wk, game, new, ref, work, log):
     """Max/mean vertex distance (mm) per mesh between our output and a reference refit. Meshes are matched by name;
-    a static override (same path) and a switcher-style _<body> sibling of the same stem are treated as the same mesh."""
+    a static override (same path) and a switcher-style _<body> sibling of the same stem are treated as the same mesh.
+    -> (worst max over all meshes, mean over all compared vertices), (None, None) when nothing could be compared."""
     import numpy as np
 
     a = positions(wk, game, new, os.path.join(work, "cmp_new"))
     b = positions(wk, game, ref, os.path.join(work, "cmp_ref"))
-    norm = lambda n: n.replace("_eve.mesh", ".mesh").replace("_angel.mesh", ".mesh")
+    norm = lambda n: (
+        n.replace("_eve.mesh", ".mesh")
+        .replace("_angel.mesh", ".mesh")
+        .replace("_base_body.mesh", ".mesh")
+    )
     bn = {norm(k): v for k, v in b.items()}
-    worst = None
+    worst, alld = None, []
     for k, pa in sorted(a.items()):
         pb = b.get(k) or bn.get(norm(k))
         if pb is None:
@@ -80,11 +93,36 @@ def compare(wk, game, new, ref, work, log):
             continue
         d = np.linalg.norm(np.vstack(pa) - np.vstack(pb), axis=1) * 1000
         worst = max(worst or 0.0, float(d.max()))
+        alld.append(d)
         log(
             "    %-60s max %.3f mm  mean %.4f mm  (%d verts)"
             % (os.path.basename(k), d.max(), d.mean(), len(d))
         )
-    return worst
+    return worst, (float(np.concatenate(alld).mean()) if alld else None)
+
+
+def show_compare(wk, game, new, ref, log, what="reference"):
+    """compare() with its own work folder; information, never a pass/fail gate. -> (worst, mean) or (None, None)."""
+    import core
+
+    work = tempfile.mkdtemp(prefix="cmp_", dir=core._work_root())
+    try:
+        log("  compare with %s %s:" % (what, os.path.basename(ref)))
+        w, m = compare(wk, game, new, ref, work, log)
+        log(
+            "  worst vertex difference: %s"
+            % (
+                "%.3f mm (mean %.3f mm)" % (w, m)
+                if w is not None
+                else "nothing could be compared"
+            )
+        )
+        return w, m
+    except Exception as e:
+        log("  comparison failed: %s" % e)
+        return None, None
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def check_variants(core):
@@ -130,6 +168,96 @@ def check_variants(core):
             msgs = []
             core.variant_warning([name, r"archive\pc\mod\x.archive"], msgs.append)
             assert (warn in msgs[0]) if warn else not msgs, (name, msgs)
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+
+def check_source(core):
+    """Source body ('Outfit made for'): name guess, wrong-input warning, picking a download's version for the source,
+    same source and target refused, body file checks."""
+    for name, want in (
+        ("Peachu_CasualDress-ANGEL", "angel"),
+        ("!!!AngelRefit_Peachu_SchoolShorts", "angel"),
+        ("EveRefit_x", "eve"),
+        ("EVE - Ocean String - Archive XL", "eve"),
+        ("EVE Body - Full Vanilla Refit", "eve"),  # first body word wins
+        ("Peachu_FemV_Evelyn_Vanilla", "vanilla"),  # 'Evelyn' is not EVE
+        ("Stellar_Blade_Eve_Bodysuit_ArchiveXL", None),  # 'Eve' = a character's name
+        ("Test outfit - Peachu School Shorts", None),
+    ):
+        g = core.guess_body([name])
+        assert (g[1] if g else None) == want, (name, g)
+    assert core.guess_body(["Quiet Outfit_Hyst EBRB Refit-5194"]) == ("EBRB", None)
+    assert core.xl_name("vanilla") == "base_body" and core.xl_name("angel") == "angel"
+    for src, texts, warn in (
+        ("vanilla", ["Peachu_CasualDress-ANGEL"], "looks made for Hyst Angel"),
+        ("angel", ["Peachu_CasualDress-ANGEL"], None),
+        (
+            "eve",
+            ["Peachu_CasualDress-ANGEL"],
+            "but 'Outfit made for' is set to Hyst EVE",
+        ),
+        (
+            "angel",
+            [r"Vanilla\archive\pc\mod\x.archive", "Outfit"],
+            "looks made for Vanilla",
+        ),
+        (
+            "angel",
+            ["Dress VTK Small"],
+            "made for another body (VTK), not for Hyst Angel",
+        ),
+        ("vanilla", ["Some Outfit"], None),
+    ):
+        msgs = []
+        core.variant_warning(texts, msgs.append, src)
+        assert (len(msgs) == 1 and warn in msgs[0]) if warn else not msgs, (
+            src,
+            texts,
+            msgs,
+        )
+    arcs = [
+        r"r\Vanilla\a.archive",
+        r"r\Angel\a.archive",
+        r"r\EBB\a.archive",
+        r"r\x\d_vanilla.archive",
+        r"r\x\d_angel.archive",
+        r"r\x\d_ebb.archive",
+        r"r\s.archive",
+    ]
+    for src, want in (
+        ("vanilla", [r"r\Vanilla\a.archive", r"r\s.archive", r"r\x\d_vanilla.archive"]),
+        ("angel", [r"r\Angel\a.archive", r"r\s.archive", r"r\x\d_angel.archive"]),
+        ("eve", [r"r\Vanilla\a.archive", r"r\s.archive", r"r\x\d_vanilla.archive"]),
+    ):
+        got = core.choose_archives(arcs, "r", lambda m: None, src)
+        assert got == want, (src, got)
+    t = tempfile.mkdtemp(prefix="outfitrefit_src_")
+    try:
+        game = os.path.join(t, "Spiel ä")
+        os.makedirs(os.path.join(game, "bin", "x64"))
+        open(os.path.join(game, "bin", "x64", "Cyberpunk2077.exe"), "wb").close()
+        try:
+            core.setup(game, "angel", "angel", lambda m: None)
+            assert False, "same source and target accepted"
+        except core.ToolError as e:
+            assert "both Hyst Angel" in str(e), e
+        import zipfile
+
+        empty = os.path.join(t, "kein Körper ö.zip")
+        with zipfile.ZipFile(empty, "w") as z:
+            z.writestr("readme.txt", "x")
+        for bad in (empty, os.path.join(t, "x.txt")):
+            try:
+                core.check_body_file(bad, "eve")
+                assert False, bad
+            except core.ToolError:
+                pass
+        assert core.body_source(game, "vanilla") == core.vanilla_sources(game)
+        assert core.body_source(game, "eve", {"eve": empty}) == [empty]
+        assert (
+            core.body_source(game, "eve", {"eve": os.path.join(t, "gone.zip")}) is None
+        )
     finally:
         shutil.rmtree(t, ignore_errors=True)
 
@@ -387,11 +515,11 @@ def gui_install_tests(core, gui, a, log, fails):
         "angel"
     ) or core.find_body_archive(real, "angel")
     game = make_fake_game(base, real)
-    van = os.path.join(core.DATA, "cages", "van")
+    van = core.cage_dir("vanilla")
     if os.path.isdir(
         van
     ):  # the fake game has no base-game archives: keep the vanilla shape read from the real game
-        open(os.path.join(van, "source.txt"), "w").write(
+        open(os.path.join(van, "source.txt"), "w", encoding="utf-8").write(
             core._stamp(core.vanilla_sources(game))
         )
     out = os.path.join(base, "Ausgabe Ordner ü")
@@ -579,6 +707,226 @@ def gui_install_tests(core, gui, a, log, fails):
         snap(game) == s0 and core.installed() == [],
         new_files(s0),
     )
+
+
+def gui_source_tests(core, gui, a, log, fails):
+    r"""--gui-source DIR --gui-source-outfit ANGEL_OUTFIT [--gui-source-body eve=DOWNLOAD]: 'Outfit made for' in the
+    real window. Name pre-fill + Angel -> vanilla, a wrong source (warning, the refit still runs), source = target
+    (refused), a missing source body (clear stop), the source body read from a download (shape read fresh),
+    'Body file...' checks, closing the window mid-refit. Inputs and output live in DIR (umlaut paths); the real game
+    folder is only read (Install stays unticked)."""
+    import refit, zipfile
+    from tkinter import messagebox
+
+    base = os.path.abspath(opt(a, "--gui-source"))
+    game = opt(a, "--game") or core.find_game()
+    barch = dict(x.split("=", 1) for x in opt_all(a, "--body-archive"))
+    dls = dict(x.split("=", 1) for x in opt_all(a, "--gui-source-body"))
+    inp = os.path.join(base, "Eingabe ä ö")
+    os.makedirs(inp, exist_ok=True)
+    outfit = os.path.join(inp, os.path.basename(opt(a, "--gui-source-outfit")))
+    shutil.copy2(
+        opt(a, "--gui-source-outfit"), outfit
+    )  # a copy: never touch the installed mod
+    out = os.path.join(base, "Ausgabe ü")
+    os.makedirs(out, exist_ok=True)
+    md = core.mod_dir(game)
+    mods0 = sorted(
+        (os.path.relpath(os.path.join(dp, f), md), os.path.getsize(os.path.join(dp, f)))
+        for dp, _, fs in os.walk(md)
+        for f in fs
+    )
+    log("\n### 'Outfit made for' tests in the window: %s" % os.path.basename(outfit))
+
+    def check(name, cond, detail=""):
+        log(
+            "  %s %s%s"
+            % (
+                "OK  " if cond else "FAIL",
+                name,
+                (" -- %s" % (detail,)) if detail and not cond else "",
+            )
+        )
+        if not cond:
+            fails.append("source: " + name)
+
+    def made(prefix, before):
+        new = sorted(set(os.listdir(out)) - before)
+        return [f for f in new if f.startswith(prefix)]
+
+    has = lambda st, text: any(text in m for m in st["log"])
+
+    # 1. the name says ANGEL: 'Outfit made for' is pre-filled, Angel -> vanilla
+    b = set(os.listdir(out))
+    st = gui.drive(outfit, "vanilla", out, log, game=game, src=None, body_files=barch)
+    check(
+        "pre-fill: 'Outfit made for' set to Hyst Angel from the name",
+        st.get("src") == "angel" and has(st, "'Outfit made for' set to Hyst Angel"),
+        st.get("src"),
+    )
+    check("Angel -> vanilla: finished without error", st["ok"], st["errors"])
+    van = made("!!!VanillaRefit_", b)
+    check(
+        "Angel -> vanilla: !!!VanillaRefit_ archive, safety check OK",
+        len(van) == 1 and not refit.buffer_gate(os.path.join(out, van[0]), {}),
+        van,
+    )
+    check("Angel -> vanilla: no wrong-body warning", not has(st, "looks made for"))
+    # 2. wrong source: the name says ANGEL, the user leaves 'Vanilla' -> warning, refit still made
+    b = set(os.listdir(out))
+    st = gui.drive(outfit, "eve", out, log, game=game, src="vanilla", body_files=barch)
+    check("wrong source: warning in the log", has(st, "looks made for Hyst Angel"))
+    eve = made("!!!EveRefit_", b)
+    check(
+        "wrong source: refit still made (only a warning)",
+        st["ok"] and len(eve) == 1,
+        eve,
+    )
+    # 3. same body on both sides
+    st = gui.drive(outfit, "angel", out, log, game=game, src="angel", body_files=barch)
+    check(
+        "same source and target: refused with a message, nothing started",
+        not st["ok"]
+        and st["worker"] is None
+        and any("nothing to refit" in e for e in st["errors"]),
+        st["errors"],
+    )
+    # 4. source body not installed and no file picked
+    if core.find_body_archive(game, "eve"):
+        log("  (skipped the missing-body test: Hyst EVE is installed in this game)")
+    else:
+        b = set(os.listdir(out))
+        st = gui.drive(
+            outfit,
+            "vanilla",
+            out,
+            log,
+            game=game,
+            src="eve",
+            body_files={k: v for k, v in barch.items() if k != "eve"},
+        )
+        check(
+            "missing source body: clear stop with what to do",
+            has(st, "Stopped: The outfit is made for Hyst EVE")
+            and any(
+                "'Body file...' next to 'Outfit made for'" in e for e in st["errors"]
+            ),
+            st["errors"],
+        )
+        check("missing source body: no file written", made("", b) == [], made("", b))
+    # 5. source body from a download (zip in a folder with umlauts), shape read fresh
+    zp = None
+    if "eve" in dls and eve:
+        zp = os.path.join(base, "Körper Download ä", os.path.basename(dls["eve"]))
+        os.makedirs(os.path.dirname(zp), exist_ok=True)
+        if not os.path.isfile(zp):
+            shutil.copy2(dls["eve"], zp)
+        shutil.rmtree(core.cage_dir("eve"), ignore_errors=True)
+        eo = os.path.join(inp, eve[0])
+        shutil.copy2(os.path.join(out, eve[0]), eo)
+        b = set(os.listdir(out))
+        st = gui.drive(
+            eo, "vanilla", out, log, game=game, src=None, body_files=dict(barch, eve=zp)
+        )
+        check(
+            "body download: 'Outfit made for' pre-filled EVE (EveRefit_ name)",
+            st.get("src") == "eve",
+        )
+        check(
+            "body download: EVE shape read from the zip, refit made",
+            st["ok"]
+            and has(st, "Reading the Hyst EVE body shape")
+            and len(made("!!!VanillaRefit_", b)) == 1,
+            st["errors"],
+        )
+        stamp = open(
+            os.path.join(core.cage_dir("eve"), "source.txt"), encoding="utf-8"
+        ).read()
+        check(
+            "body download: cache remembers the zip",
+            os.path.basename(zp) in stamp,
+            stamp,
+        )
+        shutil.rmtree(
+            core.cage_dir("eve"), ignore_errors=True
+        )  # later runs re-read it from their own file
+    # 6. 'Body file...' (the part after the file dialog), help text
+    boxes = []
+    messagebox.showerror = lambda t, m, **k: boxes.append(m)
+    messagebox.showinfo = lambda t, m, **k: boxes.append(m)
+    bogus = os.path.join(inp, "kaputt ö.txt")
+    open(bogus, "w").write("not a body")
+    empty = os.path.join(inp, "leer ä.zip")
+    with zipfile.ZipFile(empty, "w") as z:
+        z.writestr("readme.txt", "no archive in here")
+    good = zp or barch.get("eve")
+    saved = core.load_settings()
+
+    def script(app, root):
+        n = len(boxes)
+        r1, r2 = app.use_body_file("eve", bogus), app.use_body_file("eve", empty)
+        check(
+            "Body file...: a text file and a zip without .archive are refused",
+            r1 is False and r2 is False and len(boxes) == n + 2,
+            boxes[n:],
+        )
+        app.src.set(core.body_name("eve"))
+        app.show_body()
+        if good:
+            check(
+                "Body file...: a body download / .archive is taken and shown",
+                app.use_body_file("eve", good)
+                and app.src_info["text"] == "found: " + os.path.basename(good),
+                app.src_info["text"],
+            )
+        app.src.set(core.body_name("vanilla"))
+        app.pick_body("src")  # vanilla: no file dialog, a message instead
+        check(
+            "Body file... for vanilla: says none is needed",
+            "needs no body file" in boxes[-1],
+            boxes[-1:],
+        )
+        h = app.show_help()
+        root.update()
+        text = h.winfo_children()[0].get("1.0", "end")
+        h.destroy()
+        check(
+            "help explains 'Outfit made for'",
+            "Outfit made for" in text and "Body file..." in text,
+        )
+        yield lambda: True
+
+    check("Body file... script ran", gui.drive_script(script, log))
+    core.save_settings(saved)
+    # 7. close the window while refitting from Angel
+    out2 = os.path.join(base, "Ausgabe Abbruch ö")
+    os.makedirs(out2, exist_ok=True)
+    st = gui.drive(
+        outfit,
+        "vanilla",
+        out2,
+        log,
+        game=game,
+        src="angel",
+        body_files=barch,
+        close_on="=== ",
+    )
+    check("close mid-refit: window closed", st["closed"])
+    if st["worker"]:
+        st["worker"].join(300)
+    check(
+        "close mid-refit: refit thread ended",
+        not (st["worker"] and st["worker"].is_alive()),
+    )
+    check(
+        "close mid-refit: no file left behind", os.listdir(out2) == [], os.listdir(out2)
+    )
+    mods1 = sorted(
+        (os.path.relpath(os.path.join(dp, f), md), os.path.getsize(os.path.join(dp, f)))
+        for dp, _, fs in os.walk(md)
+        for f in fs
+    )
+    check("game mod folder unchanged", mods0 == mods1)
 
 
 def check_scrub():
@@ -972,6 +1320,12 @@ def main(a):
         log("FAIL download-variant selection: %s" % e)
         fails.append("variants")
     try:
+        check_source(core)
+        log("source body (name guess, warning, version pick, body files) OK")
+    except AssertionError as e:
+        log("FAIL source body: %s" % (e,))
+        fails.append("source body")
+    try:
         check_recover_names(rdar, __import__("refit"))
         log("names for archives without a name list OK")
     except AssertionError as e:
@@ -1014,17 +1368,26 @@ def main(a):
         if bad:
             fails.append("own reader " + os.path.basename(o))
     barch = dict(x.split("=", 1) for x in opt_all(a, "--body-archive"))
+    pair = lambda spec: spec.split(">") if ">" in spec else ["vanilla", spec]
     tags = sorted(
-        set(core.bodies()["bodies"])
-        & (
-            {t for t in barch}
-            | {c.split("=")[0] for c in opt_all(a, "--case")}
-            | {t for t in core.bodies()["bodies"] if core.find_body_archive(game, t)}
+        (
+            set(core.bodies()["bodies"])
+            & (
+                {t for t in barch}
+                | {t for c in opt_all(a, "--case") for t in pair(c.split("=")[0])}
+                | {
+                    t
+                    for t in core.bodies()["bodies"]
+                    if core.bodies()["bodies"][t].get("archives")
+                    and core.find_body_archive(game, t)
+                }
+            )
         )
+        - {"vanilla"}
     )
     for t in tags:
         try:
-            _, cages = core.setup(game, t, log, body_archive=barch.get(t))
+            _, cages = core.setup(game, "vanilla", t, log, body_files=barch)
             log(
                 "body shape %s OK: %s"
                 % (t, ", ".join(os.path.basename(c) for c in cages[t].split(";")))
@@ -1032,16 +1395,16 @@ def main(a):
         except core.ToolError as e:
             log("FAIL body %s: %s" % (t, e))
             fails.append(t)
-    for c in opt_all(a, "--case"):
-        parts = c.split("=")
-        tag, inp, ref = parts[0], parts[1], (parts[2] if len(parts) > 2 else None)
-        log("\n### case %s -> %s" % (os.path.basename(inp), tag))
-        res = core.run_batch([inp], tag, game, out, log, body_archive=barch.get(tag))
+
+    def run_case(src, tag, inp, dest):
+        """One refit like the window does it, plus the safety check of the output. -> output archive or None."""
+        log("\n### case %s: %s -> %s" % (os.path.basename(inp), src, tag))
+        res = core.run_batch([inp], tag, game, dest, log, body_files=barch, src=src)
         arch = res[0][1]
         if not arch:
             log("FAIL: no output (%s)" % res[0][2])
             fails.append(inp)
-            continue
+            return None
         bad = __import__("refit").buffer_gate(arch, {})
         r = rdar.Rdar(arch)
         log(
@@ -1057,21 +1420,54 @@ def main(a):
             log("    " + n)
         if bad or not r.crc_ok:
             fails.append(inp)
-        if ref:
-            work = tempfile.mkdtemp(prefix="cmp_", dir=core._work_root())
-            try:
-                log("  compare with reference %s:" % os.path.basename(ref))
-                w = compare(wk, game, arch, ref, work, log)
-                log(
-                    "  worst vertex difference: %s"
-                    % ("%.3f mm" % w if w is not None else "nothing could be compared")
+        return arch
+
+    # --case [SRC>]TGT=OUTFIT[=REFERENCE[=exact]]: exact = must give the reference's positions (within 0.0005 mm)
+    for c in opt_all(a, "--case"):
+        parts = c.split("=")
+        (src, tag), inp = pair(parts[0]), parts[1]
+        ref = parts[2] if len(parts) > 2 else None
+        arch = run_case(src, tag, inp, out)
+        if arch and ref:
+            w, _ = show_compare(wk, game, arch, ref, log)
+            if parts[3:] == ["exact"] and (w is None or w > 0.0005):
+                log("FAIL: not the same as the reference")
+                fails.append("exact " + os.path.basename(inp))
+    # --compare A=B: how far apart two archives are (information, e.g. an author's Angel and vanilla versions)
+    for c in opt_all(a, "--compare"):
+        x, y = c.split("=", 1)
+        log("\n### compare %s with %s" % (os.path.basename(x), os.path.basename(y)))
+        show_compare(wk, game, x, y, log, "")
+    # --roundtrip TAG=OUTFIT[=MAX_MEAN_MM]: vanilla -> TAG -> vanilla must come back close to the vanilla original
+    for c in opt_all(a, "--roundtrip"):
+        parts = c.split("=")
+        tag, inp = parts[0], parts[1]
+        log(
+            "\n### round trip vanilla -> %s -> vanilla: %s"
+            % (tag, os.path.basename(inp))
+        )
+        rt = tempfile.mkdtemp(prefix="rt_", dir=core._work_root())
+        try:
+            orig = core.prepare_input(inp, os.path.join(rt, "orig"), lambda m: None)
+            one = run_case("vanilla", tag, inp, os.path.join(rt, "1"))
+            two = one and run_case(tag, "vanilla", one, os.path.join(rt, "2"))
+            if not two or len(orig) != 1:
+                log("FAIL: round trip incomplete (%d original archives)" % len(orig))
+                fails.append("roundtrip " + os.path.basename(inp))
+                continue
+            w, m = show_compare(wk, game, two, orig[0], log, "the vanilla original")
+            log(
+                "  round trip error: max %s mm, mean %s mm"
+                % (
+                    "%.3f" % w if w is not None else "?",
+                    "%.3f" % m if m is not None else "?",
                 )
-            except (
-                Exception
-            ) as e:  # the comparison is information, not a pass/fail gate
-                log("  comparison failed: %s" % e)
-            finally:
-                shutil.rmtree(work, ignore_errors=True)
+            )
+            if m is None or (len(parts) > 2 and m > float(parts[2])):
+                log("FAIL: round trip error too big or not measurable")
+                fails.append("roundtrip " + os.path.basename(inp))
+        finally:
+            shutil.rmtree(rt, ignore_errors=True)
     if "--gui" in a:
         try:
             import gui
@@ -1082,13 +1478,17 @@ def main(a):
             log("FAIL: window did not start: %r" % e)
             fails.append("gui")
     for v in [x for i, x in enumerate(a) if i and a[i - 1] == "--gui-drop"]:
-        tag, outfit, *expect = v.split("=")
-        log("\nGUI drag-and-drop test: %s -> %s" % (os.path.basename(outfit), tag))
+        spec, outfit, *expect = v.split("=")
+        src, tag = pair(spec)
+        log(
+            "\nGUI drag-and-drop test: %s, %s -> %s"
+            % (os.path.basename(outfit), src, tag)
+        )
         try:
             import gui, refit
 
             out = tempfile.mkdtemp(prefix="rf_guidrop_")
-            st = gui.drive(outfit, tag, out, log, game=game, body_file=barch.get(tag))
+            st = gui.drive(outfit, tag, out, log, game=game, body_files=barch, src=src)
             for m in st["log"]:
                 log("    | " + m)
             arcs = [f for f in os.listdir(out) if f.lower().endswith(".archive")]
@@ -1118,6 +1518,14 @@ def main(a):
         except Exception:
             log("FAIL: gui-drop crashed:\n" + traceback.format_exc())
             fails.append("gui-drop " + tag)
+    if opt(a, "--gui-source"):
+        try:
+            import gui
+
+            gui_source_tests(core, gui, a, log, fails)
+        except Exception:
+            log("FAIL: 'Outfit made for' tests crashed:\n" + traceback.format_exc())
+            fails.append("gui-source")
     if opt(a, "--gui-install"):
         try:
             import gui

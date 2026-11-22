@@ -123,7 +123,11 @@ def file_version(path):
         ):
             return None
         ms, ls = (ctypes.c_uint32 * 4).from_address(p.value)[2:4]
-        return "%d.%d.%d" % (ms >> 16, ms & 0xFFFF, ls >> 16)  # the 4th part is often a cut-off build date
+        return "%d.%d.%d" % (
+            ms >> 16,
+            ms & 0xFFFF,
+            ls >> 16,
+        )  # the 4th part is often a cut-off build date
     except Exception:
         return None
 
@@ -184,8 +188,12 @@ def outfit_parts(path):
         for f in files
         if f.lower().endswith(".xl") and os.path.normcase(os.path.dirname(f)) in dirs
     )
-    if any("vanilla" in x.lower() for x in xls):  # e.g. a_vanilla.xl beside a_ebb.xl: only the vanilla one counts
-        xls = [x for x in xls if "vanilla" in x.lower() or not core.VARIANT_BODY.search(x)]
+    if any(
+        "vanilla" in x.lower() for x in xls
+    ):  # e.g. a_vanilla.xl beside a_ebb.xl: only the vanilla one counts
+        xls = [
+            x for x in xls if "vanilla" in x.lower() or not core.VARIANT_BODY.search(x)
+        ]
     tweaks = []
     for f in files:
         parts = os.path.relpath(f, root).split(os.sep)
@@ -241,7 +249,11 @@ def check_game(game, out_dir, outfits, refits, lines):
     for name, rel in FRAMEWORKS:
         lines.append("%s: %s" % (name, _have(game, rel)))
     found = mod_files(game)
-    pats = [(t, p) for t, b in core.bodies()["bodies"].items() for p in b["archives"]]
+    pats = [
+        (t, p)
+        for t, b in core.bodies()["bodies"].items()
+        for p in b.get("archives", [])
+    ]
     bodies = sorted(
         {
             "%s (%s)" % (r, core.body_name(t))
@@ -257,7 +269,8 @@ def check_game(game, out_dir, outfits, refits, lines):
     )
     dup = {n: r for n, r in found.items() if n.endswith(".archive") and len(r) > 1}
     lines.append(
-        "Same .archive name in more than one folder: %s" % ("none" if not dup else "yes, see below")
+        "Same .archive name in more than one folder: %s"
+        % ("none" if not dup else "yes, see below")
     )
     for n in sorted(dup):
         lines.append("  DUPLICATE: " + ", ".join(dup[n]))
@@ -353,15 +366,17 @@ def build(session, settings, game, out, outfits, refits):
         L.append("Data folder: %s" % core.DATA)
 
     def setting():
-        tag = settings.get("body")
-        L.append(
-            "Body: %s"
-            % (core.body_name(tag) if tag in core.bodies()["bodies"] else tag)
-        )
+        known = core.bodies()["bodies"]
+        for label, key in (("Outfit made for", "from"), ("Body", "body")):
+            tag = settings.get(key)
+            if tag:
+                L.append(
+                    "%s: %s" % (label, core.body_name(tag) if tag in known else tag)
+                )
         for t, p in sorted(settings.get("body_archive", {}).items()):
             L.append(
                 "Body file picked for %s: %s (%s)"
-                % (t, p, "exists" if os.path.isfile(p) else "MISSING")
+                % (t, p, "exists" if os.path.exists(p) else "MISSING")
             )
         L.append(
             "Install into the game: %s"
@@ -407,20 +422,22 @@ def build(session, settings, game, out, outfits, refits):
         if not lst:
             L.append("nothing")
         for e in lst:
-            L.append((
-                "%s: %s  (%s, %s) %s"
-                % (
-                    "Original outfit" if e.get("kind") == "original" else "Refit",
-                    os.path.join(e.get("folder", ""), e.get("file", "")),
-                    e.get("outfit", ""),
-                    e.get("date", ""),
-                    ""
-                    if os.path.isfile(
-                        os.path.join(e.get("folder", ""), e.get("file", ""))
+            L.append(
+                (
+                    "%s: %s  (%s, %s) %s"
+                    % (
+                        "Original outfit" if e.get("kind") == "original" else "Refit",
+                        os.path.join(e.get("folder", ""), e.get("file", "")),
+                        e.get("outfit", ""),
+                        e.get("date", ""),
+                        ""
+                        if os.path.isfile(
+                            os.path.join(e.get("folder", ""), e.get("file", ""))
+                        )
+                        else "-- file is GONE",
                     )
-                    else "-- file is GONE",
-                )
-            ).rstrip())
+                ).rstrip()
+            )
 
     part("1. Tool and system", system)
     part("2. Settings", setting)

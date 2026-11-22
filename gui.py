@@ -87,27 +87,31 @@ def enable_drop(root, callback):
 
 
 HELP_TEXT = """What this tool does
-Most clothing mods are made for the normal (vanilla) body. This tool reshapes an outfit so it fits your body mod (Hyst Angel or Hyst EVE). It makes one small extra file; the original outfit stays untouched.
+An outfit only fits the body it was made for. This tool reshapes an outfit from one body to another: from the normal (vanilla) body to Hyst Angel or Hyst EVE, from Angel or EVE back to vanilla, or between Angel and EVE. It makes one small extra file; the original outfit stays untouched.
 
 Steps, in order
 1. Game folder: check that the top line shows your Cyberpunk 2077 folder. If not, click 'Change...' next to it and pick the folder that contains 'bin' and 'archive'.
 
-2. Your body mod: pick Hyst Angel or Hyst EVE. Below it you should see 'found: ...'. If it says 'not found', install that body mod first, or click 'Body file...' and pick its .archive.
+2. Outfit made for: the body the outfit was made for. Most outfits are made for the normal body: leave it on 'Vanilla (normal body)'. When you add an outfit whose name says 'Angel', 'EVE' or 'Vanilla', the tool sets this for you; check it and change it if it's wrong.
+   If the outfit is made for Angel or EVE and that body mod is NOT in your game (for example you use EVE and the outfit is for Angel), click 'Body file...' next to it and pick that body mod's download (zip / 7z / rar) or its .archive. The tool only reads the body shape from it, once. It installs nothing.
 
-3. Output folder: where the finished refits are saved. Click 'Change...' to pick another folder.
+3. Your body mod: the body you use and want the outfit to fit: Hyst Angel, Hyst EVE, or 'Vanilla (normal body)' if you play without a body mod. Below it you should see 'found: ...'. If it says 'not found', install that body mod first, or click 'Body file...' and pick its download or .archive.
 
-4. Add the outfit: drag its download (zip / 7z / rar), its unpacked folder or its .archive file into the big list. Or use 'Add outfit...' / 'Add folder...'. Use the outfit's VANILLA-body version. You can add several outfits at once.
+4. Output folder: where the finished refits are saved. Click 'Change...' to pick another folder.
 
-5. Install: tick 'Install into the game when done' if the tool should put the refit straight into your game. If the original outfit is not in your game yet, the tool installs it too, from the same download. Leave it unticked to only save the file in the output folder; then nothing goes into your game.
+5. Add the outfit: drag its download (zip / 7z / rar), its unpacked folder or its .archive file into the big list. Or use 'Add outfit...' / 'Add folder...'. You can add several outfits at once, but 'Outfit made for' counts for all of them, so add outfits for one body at a time. If a download has versions for several bodies, the tool uses the one for 'Outfit made for' (or the vanilla one).
 
-6. Click 'Refit'. The bar and the log below show the progress. The first run takes longer: the tool downloads WolvenKit (about 45 MB) and reads the body shape from your game once.
+6. Install: tick 'Install into the game when done' if the tool should put the refit straight into your game. If the original outfit is not in your game yet, the tool installs it too, from the same download. Leave it unticked to only save the file in the output folder; then nothing goes into your game.
 
-7. Done. If you didn't tick Install, click 'Open output folder' and copy the .archive file(s) into <game folder>\\archive\\pc\\mod. The original outfit must be in your game as well; the refit only reshapes it. The log tells you if it is missing.
+7. Click 'Refit'. The bar and the log below show the progress. The first run takes longer: the tool downloads WolvenKit (about 45 MB) and reads the body shapes once.
+
+8. Done. If you didn't tick Install, click 'Open output folder' and copy the .archive file(s) into <game folder>\\archive\\pc\\mod. The original outfit must be in your game as well; the refit only reshapes it. The log tells you if it is missing.
 
 Undo
-'Uninstall...' lists what this tool put into your game: refits, and original outfits it installed because they were missing. Select what to remove. Or delete the AngelRefit_/EveRefit_ file from archive\\pc\\mod yourself.
+'Uninstall...' lists what this tool put into your game: refits, and original outfits it installed because they were missing. Select what to remove. Or delete the AngelRefit_ / EveRefit_ / VanillaRefit_ file from archive\\pc\\mod yourself.
 
 Good to know
+- Pick the right 'Outfit made for'. If an Angel outfit is refit as if it were vanilla, it gets reshaped twice and won't fit. The log warns you when the outfit's name says another body than the one you picked.
 - The refit only works together with the original outfit. With Install ticked, the tool checks your game and installs the original if it is missing. An original that is already installed is left as it is.
 - Refits are for your own game. Don't upload refits of other people's outfits without the outfit author's permission.
 - If something is skipped (for example glasses or props), the log says so; the rest of the outfit is still refit.
@@ -151,30 +155,39 @@ class App:
             row=0, column=1, sticky="ew", padx=4
         )
         self.button(f, "Change...", self.pick_game).grid(row=0, column=2)
-        ttk.Label(f, text="Your body mod:").grid(
-            row=1, column=0, sticky="w", pady=(6, 0)
-        )
         names = [core.body_name(t) for t in self.tags]
-        self.body = tk.StringVar(value=core.body_name(self.s.get("body", self.tags[0])))
-        cb = ttk.Combobox(
-            f, textvariable=self.body, values=names, state="readonly", width=18
+        body = self.s.get("body", "angel")
+        self.src = tk.StringVar(value=core.body_name("vanilla"))
+        self.body = tk.StringVar(
+            value=core.body_name(body if body in self.tags else "angel")
         )
-        cb.grid(row=1, column=1, sticky="w", padx=4, pady=(6, 0))
-        cb.bind("<<ComboboxSelected>>", lambda e: self.show_body())
-        self.button(f, "Body file...", self.pick_body).grid(
-            row=1, column=2, pady=(6, 0)
+        self.src_info, self.body_info = (
+            ttk.Label(f, text="", foreground="#555") for _ in range(2)
         )
-        self.body_info = ttk.Label(f, text="", foreground="#555")
-        self.body_info.grid(row=2, column=1, columnspan=2, sticky="w", padx=4)
+        for row, label, var, info, role in (
+            (1, "Outfit made for:", self.src, self.src_info, "src"),
+            (3, "Your body mod:", self.body, self.body_info, "body"),
+        ):
+            ttk.Label(f, text=label).grid(row=row, column=0, sticky="w", pady=(6, 0))
+            cb = ttk.Combobox(
+                f, textvariable=var, values=names, state="readonly", width=22
+            )
+            cb.grid(row=row, column=1, sticky="w", padx=4, pady=(6, 0))
+            cb.bind("<<ComboboxSelected>>", lambda e: self.show_body())
+            self.button(f, "Body file...", lambda r=role: self.pick_body(r)).grid(
+                row=row, column=2, pady=(6, 0)
+            )
+            info.grid(row=row + 1, column=1, columnspan=2, sticky="w", padx=4)
         ttk.Label(f, text="Output folder:").grid(
-            row=3, column=0, sticky="w", pady=(6, 0)
+            row=5, column=0, sticky="w", pady=(6, 0)
         )
         self.out = tk.StringVar(value=self.s.get("out") or core.DEFAULT_OUT)
         ttk.Entry(f, textvariable=self.out, state="readonly").grid(
-            row=3, column=1, sticky="ew", padx=4, pady=(6, 0)
+            row=5, column=1, sticky="ew", padx=4, pady=(6, 0)
         )
-        self.button(f, "Change...", self.pick_out).grid(row=3, column=2, pady=(6, 0))
+        self.button(f, "Change...", self.pick_out).grid(row=5, column=2, pady=(6, 0))
         f.columnconfigure(1, weight=1)
+        self.guesses = {}  # outfit in the list -> body tag its name says it is made for
 
         box = ttk.LabelFrame(
             root, text="Outfits to refit: drop zip / 7z / rar / folder / .archive here"
@@ -222,21 +235,41 @@ class App:
         # record every change of these, also from the self-test; the traces are removed with the window, or
         # Tcl keeps them (and this whole window) alive and fires its old timers into the next window
         traces = [
-            (var, var.trace_add("write", lambda *x, n=name, v=var: self.rec("action", "%s set to: %s" % (n, v.get()))))
-            for name, var in (("game folder", self.game), ("body", self.body), ("output folder", self.out))
+            (
+                var,
+                var.trace_add(
+                    "write",
+                    lambda *x, n=name, v=var: self.rec(
+                        "action", "%s set to: %s" % (n, v.get())
+                    ),
+                ),
+            )
+            for name, var in (
+                ("game folder", self.game),
+                ("outfit made for", self.src),
+                ("body", self.body),
+                ("output folder", self.out),
+            )
         ]
         traces.append(
             (
                 self.inst,
                 self.inst.trace_add(
                     "write",
-                    lambda *x: self.rec("action", "install box " + ("ticked" if self.inst.get() else "unticked")),
+                    lambda *x: self.rec(
+                        "action",
+                        "install box " + ("ticked" if self.inst.get() else "unticked"),
+                    ),
                 ),
             )
         )
         root.bind(
             "<Destroy>",
-            lambda e: [v.trace_remove("write", t) for v, t in traces] if e.widget is root else None,
+            lambda e: (
+                [v.trace_remove("write", t) for v, t in traces]
+                if e.widget is root
+                else None
+            ),
             add="+",
         )
         if not enable_drop(root, lambda f: self.add(f, "dropped")):
@@ -248,14 +281,21 @@ class App:
                 "Game folder not found automatically. Click 'Change...' and pick your Cyberpunk 2077 folder."
             )
         else:
-            self.log("Ready. Add outfits, check the body, then press Refit.")
+            self.log(
+                "Ready. Add outfits, check 'Outfit made for' and your body, then press Refit."
+            )
         root.update_idletasks()  # never shrink the window so far that buttons get cut off
         root.minsize(max(560, a.winfo_reqwidth() + 16), 520)
         root.after(100, self.poll)
 
     # ---- helpers ----
     def tag(self):
+        """The body to refit to ('Your body mod')."""
         return self.tags[[core.body_name(t) for t in self.tags].index(self.body.get())]
+
+    def src_tag(self):
+        """The body the outfits are made for ('Outfit made for')."""
+        return self.tags[[core.body_name(t) for t in self.tags].index(self.src.get())]
 
     def rec(self, kind, text):
         self.session.add(kind, text)
@@ -286,22 +326,33 @@ class App:
         self.s.update(game=self.game.get(), body=self.tag(), install=self.inst.get())
         core.save_settings(self.s)
 
+    def body_files(self):
+        """{body tag: body file the user picked} (plain copy, safe to hand to the worker)."""
+        return dict(self.s.get("body_archive", {}))
+
     def body_file(self):
-        return self.s.get("body_archive", {}).get(self.tag())
+        return self.body_files().get(self.tag())
 
     def show_body(self):
-        g, t = self.game.get(), self.tag()
-        p = (
-            self.body_file()
-            if self.body_file() and os.path.isfile(self.body_file())
-            else (core.find_body_archive(g, t) if core.is_game_dir(g) else None)
-        )
-        self.body_info["text"] = (
-            ("found: " + os.path.basename(p))
-            if p
-            else "not found in the game - install %s or use 'Body file...'"
-            % core.body_name(t)
-        )
+        g = self.game.get()
+        for info, t, src in (
+            (self.src_info, self.src_tag(), True),
+            (self.body_info, self.tag(), False),
+        ):
+            if core.bodies()["bodies"][t].get("game"):
+                info["text"] = "comes from your game, nothing to install"
+                continue
+            p = self.body_files().get(t)
+            if not (p and os.path.exists(p)):
+                p = core.find_body_archive(g, t) if core.is_game_dir(g) else None
+            info["text"] = (
+                ("found: " + os.path.basename(p))
+                if p
+                else "not in the game - pick its download or .archive with 'Body file...' (only read)"
+                if src
+                else "not found in the game - install %s or use 'Body file...'"
+                % core.body_name(t)
+            )
 
     def add(self, files, how="added"):
         have = set(self.lst.get(0, "end"))
@@ -310,6 +361,41 @@ class App:
                 self.lst.insert("end", f)
                 have.add(f)
                 self.rec("action", "%s outfit: %s" % (how, f))
+                self.guess_source(f)
+
+    def guess_source(self, f):
+        """Pre-fill 'Outfit made for' from an added outfit's name (the user can change it). Names that say nothing
+        leave it as it is."""
+        g = core.guess_body([core.shown_name(f)])
+        if not g:
+            return
+        word, t = g
+        if t is None:
+            self.log(
+                "%s looks made for %s, which this tool can't refit from yet. Use the outfit's vanilla version if "
+                "it has one." % (core.shown_name(f), word)
+            )
+            return
+        self.guesses[f] = t
+        if t != self.src_tag():
+            self.src.set(core.body_name(t))
+            self.show_body()
+            self.log(
+                "'Outfit made for' set to %s ('%s' in the name of %s). Change it if that's wrong."
+                % (core.body_name(t), word, core.shown_name(f))
+            )
+        if t == self.tag():
+            self.log(
+                "That is also 'Your body mod': this outfit already fits %s. Pick another body under "
+                "'Your body mod' to refit it." % core.body_name(t)
+            )
+        kinds = {self.guesses[x] for x in self.lst.get(0, "end") if x in self.guesses}
+        if len(kinds) > 1:
+            self.log(
+                "Note: the outfits in the list look made for different bodies (%s). 'Outfit made for' counts for "
+                "all of them, so refit them in groups."
+                % ", ".join(core.body_name(k) for k in sorted(kinds))
+            )
 
     # ---- buttons ----
     def pick_game(self):
@@ -335,19 +421,46 @@ class App:
             self.s["out"] = self.out.get()
             self.save()
 
-    def pick_body(self):
+    def pick_body(self, role="body"):
+        """'Body file...' next to 'Outfit made for' (role src) or 'Your body mod' (role body)."""
+        t = self.src_tag() if role == "src" else self.tag()
+        if core.bodies()["bodies"][t].get("game"):
+            self.msg(
+                "info",
+                "%s needs no body file: its shape comes from your game."
+                % core.body_name(t),
+            )
+            return
         f = filedialog.askopenfilename(
-            title="Choose the body mod's .archive", filetypes=[("Archive", "*.archive")]
+            title="Choose the %s download or its .archive" % core.body_name(t),
+            filetypes=[
+                ("Body mod download or .archive", "*.zip *.7z *.rar *.archive"),
+                ("All files", "*.*"),
+            ],
         )
         if f:
-            try:
-                core.check_body_archive(f)
-            except (core.ToolError, OSError, ValueError) as e:
-                self.msg("error", str(e))
-                return
-            self.s.setdefault("body_archive", {})[self.tag()] = os.path.normpath(f)
-            self.save()
-            self.show_body()
+            self.use_body_file(t, f)
+
+    def use_body_file(self, t, f):
+        """Check and remember a body file for body t (the part of 'Body file...' after the file dialog)."""
+        f = os.path.normpath(f)
+        self.rec("action", "body file picked for %s: %s" % (t, f))
+        try:
+            core.check_body_file(f, t)
+        except core.ToolError as e:
+            self.msg("error", str(e))
+            return False
+        except Exception as e:  # a broken zip or archive
+            self.msg(
+                "error",
+                "Could not read %s (%s). Pick the body mod's download or its main .archive."
+                % (os.path.basename(f), e),
+            )
+            return False
+        self.s.setdefault("body_archive", {})[t] = f
+        self.save()
+        self.show_body()
+        return True
 
     def pick_wk(self):
         d = filedialog.askdirectory(
@@ -390,16 +503,24 @@ class App:
         t = tk.Text(
             w, width=74, height=30, wrap="word", font=("Segoe UI", 10), padx=10, pady=8
         )
+        sb = ttk.Scrollbar(w, command=t.yview)
+        t["yscrollcommand"] = sb.set
+        ttk.Button(w, text="Close", command=w.destroy).pack(side="bottom", pady=6)
+        sb.pack(side="right", fill="y")
         t.pack(fill="both", expand=True)
         t.insert("end", HELP_TEXT)
         t["state"] = "disabled"
-        ttk.Button(w, text="Close", command=w.destroy).pack(pady=6)
         return w
 
     def support_report(self):
         """Write the support report into the output folder, show it in Explorer. Never raises."""
         try:
-            settings = dict(self.s, body=self.tag(), install=self.inst.get())
+            settings = dict(
+                self.s,
+                body=self.tag(),
+                install=self.inst.get(),
+                **{"from": self.src_tag()},
+            )
             text = support.build(
                 self.session,
                 settings,
@@ -520,12 +641,21 @@ class App:
         if not files:
             self.msg("info", "Add at least one outfit first.")
             return
+        if self.src_tag() == self.tag():
+            self.msg(
+                "info",
+                "'Outfit made for' and 'Your body mod' are both %s, so there is nothing to refit.\n\n"
+                "Set 'Outfit made for' to the body the outfit was made for."
+                % self.body.get(),
+            )
+            return
         self.save()
         self.rec(
             "action",
-            "Refit started: %d outfit(s), body %s, install %s, game %s, output %s"
+            "Refit started: %d outfit(s), made for %s, body %s, install %s, game %s, output %s"
             % (
                 len(files),
+                self.src.get(),
                 self.body.get(),
                 "ticked" if self.inst.get() else "unticked",
                 self.game.get(),
@@ -542,9 +672,10 @@ class App:
             self.game.get(),
             self.out_dir(),
             self.inst.get(),
-            self.body_file(),
+            self.body_files(),
             self.s.pop("wk_existing", None),
             self.cancel,
+            self.src_tag(),
         )
         # the worker gets only the queue and plain values, never the window objects (Tk is not thread-safe)
         self.worker = threading.Thread(
@@ -553,7 +684,7 @@ class App:
         self.worker.start()
 
     @staticmethod
-    def work(q, files, tag, game, out, inst, body_file, wk_existing, cancel):
+    def work(q, files, tag, game, out, inst, body_files, wk_existing, cancel, src):
         put = lambda m: q.put(("log", m))
         try:
             res = core.run_batch(
@@ -564,9 +695,10 @@ class App:
                 put,
                 lambda f: q.put(("prog", f)),
                 inst,
-                body_file,
+                body_files,
                 wk_existing,
                 cancel,
+                src,
             )
             ok = [r for r in res if r[1]]
             put("")
@@ -657,6 +789,8 @@ def drive(
     install=False,
     body_file=None,
     close_on=None,
+    src="vanilla",
+    body_files=None,
 ):
     """Self-test: open the real window, drop an outfit on it, pick the body (and game folder, body file, Install
     tick), press Refit, wait for the result. close_on: text; when it shows up in the log, the window gets a real
@@ -676,6 +810,8 @@ def drive(
     app.log = lambda m: (lines.append(m), show(m))
     if game:
         app.game.set(game)
+    if body_files is not None:
+        app.s["body_archive"] = dict(body_files)
     if body_file:
         app.s.setdefault("body_archive", {})[tag] = body_file
     app.out.set(out)
@@ -684,6 +820,7 @@ def drive(
     app.show_body()
     t0 = time.time()
     state = {"step": "drop", "ok": False, "log": lines, "worker": None, "closed": False}
+    state["errors"] = errors
 
     def tick():
         if state["step"] == "drop":
@@ -699,6 +836,9 @@ def drive(
         elif state["step"] == "wait_list":
             if app.lst.size():
                 log("  drop arrived in the list: %s" % app.lst.get(0))
+                if src:  # None: keep what the window pre-filled from the outfit's name
+                    app.src.set(core.body_name(src))
+                state["src"] = app.src_tag()
                 app.start()
                 state["worker"] = app.worker
                 state["step"] = "wait_done"
