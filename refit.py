@@ -6,8 +6,10 @@ move the vertices with the source->target body displacement field (only POSITION
 A mesh WolvenKit can't read at all (old file format) goes through OwnMesh instead: positions decoded from and
 written back into its own render buffer, no WolvenKit import.
 
-Source and target are any two bodies of bodies.json (vanilla, Angel, EVE); they share the vanilla topology, so the
-field goes straight from one to the other (no step over vanilla, which would add the error and the push-out twice).
+Source and target are any two bodies of bodies.json (vanilla, Angel, EVE); the field goes straight from one to the
+other (no step over vanilla, which would add the error and the push-out twice).
+Layered outfits (top < shirt < jacket, from the outfit's ArchiveXL outfit slots): garments are refit inner first and
+each outer layer is kept 1 mm above the refit inner ones (layer_push).
 - Dynamic meshes ("*path_{body}.mesh" in .ent/.app): <path>_<source xl>.mesh is refit and written as NEW
   <path>_<target xl>.mesh (xl name: vanilla = base_body, Angel = angel). Nothing of the original mod is overridden;
   ArchiveXL picks it when that body is installed (base_body = no body mod).
@@ -93,6 +95,17 @@ def body_points(paths):
     return np.vstack(pts), (np.vstack(nrm) if nrm else None)
 
 
+_SHAPE = {}
+
+
+def shape(paths):
+    """(kd-tree, positions, unit normals) of a body shape (glb paths joined with ';'), cached."""
+    if paths not in _SHAPE:
+        T, TN = body_points(paths)
+        _SHAPE[paths] = (cKDTree(T), T, TN / np.linalg.norm(TN, axis=1, keepdims=True))
+    return _SHAPE[paths]
+
+
 _FIELD = {}
 
 
@@ -101,15 +114,24 @@ def field(src, tgt):
     smoothed twice over 6 neighbours. ponytail: nearest-vertex projection, fine for ~90k-vertex bodies."""
     if (src, tgt) not in _FIELD:
         S, _ = body_points(src)
-        T, TN = body_points(tgt)
-        TN = TN / np.linalg.norm(TN, axis=1, keepdims=True)
-        ttree = cKDTree(T)
+        ttree, T, TN = shape(tgt)
         disp = T[ttree.query(S)[1]] - S
         stree = cKDTree(S)
         for _ in range(2):
             disp = disp[stree.query(S, k=6)[1]].mean(1)
         _FIELD[(src, tgt)] = (stree, disp, ttree, T, TN)
     return _FIELD[(src, tgt)]
+
+
+def push_out(Q, shp, off):
+    """Push vertices of Q (in place) that are inside body shape shp = (tree, T, TN), or closer than `off` m to its
+    skin, out to `off` m above it (only within 6 cm of it). -> mask of the pushed vertices."""
+    tree, T, TN = shp
+    _, k = tree.query(Q)
+    depth = ((Q - T[k]) * TN[k]).sum(1)
+    bad = (depth < off) & (np.linalg.norm(Q - T[k], axis=1) < 0.06)
+    Q[bad] += TN[k[bad]] * (off - depth[bad])[:, None]
+    return bad
 
 
 def move(P, src, tgt, off=0.004):
@@ -121,32 +143,207 @@ def move(P, src, tgt, off=0.004):
     w = 1.0 / np.maximum(dist, 1e-4) ** 2
     w /= w.sum(1, keepdims=True)
     Q = P + (disp[nb] * w[..., None]).sum(1)
-    _, k = ttree.query(Q)
-    depth = ((Q - T[k]) * TN[k]).sum(1)
-    bad = (depth < off) & (np.linalg.norm(Q - T[k], axis=1) < 0.06)
-    Q[bad] += TN[k[bad]] * (off - depth[bad])[:, None]
+    bad = push_out(Q, (ttree, T, TN), off)
     return Q, int(bad.sum())
 
 
-def refit_glb(gar, out, src, tgt):
-    """move() applied to a WolvenKit glb export. Only POSITION bytes change: indices, UVs, weights, normals and
-    morph targets stay identical."""
+def layer_push(Q, inner, tgt, gap=0.001, reach=0.006):
+    """Push garment vertices Q (in place) of an outer layer out of the inner layers' vertices `inner` (both already
+    refit, glb space): height = distance to the target body's surface (skin_height); where at least 3 inner vertices
+    sit over the same skin spot (closest skin points within `reach` m), an outer vertex lower than the highest of them
+    + gap is lifted to that height, straight away from the skin. Only within 6 cm of the skin. -> vertices lifted.
+    ponytail: max height over a 6 mm spot, up to 4 passes; measured on Maniekk Pt5 (0 crossings, fit ~unchanged). The
+    exact surface matters: heights along the nearest body vertex's normal left 594 jacket vertices under the shirt."""
+    if inner is None or not len(inner):
+        return 0
+    hi, fi, _ = skin_height(inner, tgt)
+    keep = np.abs(hi) < 0.06
+    if not keep.any():
+        return 0
+    hi, ftree = hi[keep], cKDTree(fi[keep])
+    lifted = np.zeros(len(Q), bool)
+    for _ in range(
+        4
+    ):  # a lifted vertex can land over another skin spot: again until nothing moves
+        ho, fo, n = skin_height(Q, tgt)
+        need = np.zeros(len(Q))
+        for i, L in enumerate(ftree.query_ball_point(fo, reach)):
+            if len(L) >= 3 and abs(ho[i]) < 0.06:
+                need[i] = hi[L].max() + gap - ho[i]
+        m = need > 1e-6
+        if not m.any():
+            break
+        Q[m] += n[m] * need[m][:, None]
+        lifted |= m
+    return int(lifted.sum())
+
+
+def closest_on_triangles(X, A, B, C):
+    """Barycentric (u, v, w) of the point of each triangle (A, B, C) closest to X (Ericson, Real-Time Collision
+    Detection 5.1.5; vectorised over any leading shape)."""
+    ab, ac, ap = B - A, C - A, X - A
+    d1, d2 = (ab * ap).sum(-1), (ac * ap).sum(-1)
+    bp, cp = X - B, X - C
+    d3, d4 = (ab * bp).sum(-1), (ac * bp).sum(-1)
+    d5, d6 = (ab * cp).sum(-1), (ac * cp).sum(-1)
+    va, vb, vc = d3 * d6 - d5 * d4, d5 * d2 - d1 * d6, d1 * d4 - d3 * d2
+    den = va + vb + vc
+    den = np.where(np.abs(den) < 1e-30, 1e-30, den)
+    v, w = vb / den, vc / den
+    U = np.stack([1 - v - w, v, w], -1)
+    z, one = np.zeros_like(d1), np.ones_like(d1)
+    safe = lambda x: np.where(x == 0, 1e-30, x)
+    for (
+        m,
+        val,
+    ) in (  # edges, then corners (later ones win, as in the book's early returns)
+        ((vc <= 0) & (d1 >= 0) & (d3 <= 0), (d1 / safe(d1 - d3), 0)),
+        ((vb <= 0) & (d2 >= 0) & (d6 <= 0), (d2 / safe(d2 - d6), 1)),
+        (
+            (va <= 0) & (d4 - d3 >= 0) & (d5 - d6 >= 0),
+            ((d4 - d3) / safe(d4 - d3 + d5 - d6), 2),
+        ),
+    ):
+        t, e = val
+        cand = [
+            np.stack([1 - t, t, z], -1),
+            np.stack([1 - t, z, t], -1),
+            np.stack([z, 1 - t, t], -1),
+        ][e]
+        U[m] = cand[m]
+    for m, c in (
+        ((d1 <= 0) & (d2 <= 0), 0),
+        ((d3 >= 0) & (d4 <= d3), 1),
+        ((d6 >= 0) & (d5 <= d6), 2),
+    ):
+        U[m] = np.stack(
+            [one, z, z] if c == 0 else [z, one, z] if c == 1 else [z, z, one], -1
+        )[m]
+    return U
+
+
+_SURF = {}
+
+
+def surface(paths):
+    """(positions, unit normals, triangles, kd-tree of triangle centres) of a body's LOD 1 surface, cached."""
+    if paths not in _SURF:
+        Ps, Ns, Fs, o = [], [], [], 0
+        for p in paths.split(";"):
+            d, j, b = load(p)
+            for m in j["meshes"]:
+                if "LOD_1" not in (m.get("name") or "LOD_1"):
+                    continue
+                for pr in m["primitives"]:
+                    P = read(d, j, b, pr["attributes"]["POSITION"])
+                    Ps.append(P)
+                    Ns.append(read(d, j, b, pr["attributes"]["NORMAL"]))
+                    Fs.append(read_index(d, j, b, pr["indices"]).reshape(-1, 3) + o)
+                    o += len(P)
+        P, N, F = np.vstack(Ps), np.vstack(Ns), np.vstack(Fs)
+        N /= np.linalg.norm(N, axis=1, keepdims=True)
+        _SURF[paths] = (P, N, F, cKDTree(P[F].mean(1)))
+    return _SURF[paths]
+
+
+def read_index(d, j, b, ai):
+    a = j["accessors"][ai]
+    bv = j["bufferViews"][a["bufferView"]]
+    dt = {5121: "<u1", 5123: "<u2", 5125: "<u4"}[a["componentType"]]
+    start = b + bv.get("byteOffset", 0) + a.get("byteOffset", 0)
+    return np.frombuffer(bytes(d), dt, a["count"], start).astype(np.int64)
+
+
+def skin_height(X, tgt, k=24):
+    """Signed distance of points X to body tgt's surface (closest point on its triangles, among the k nearest by
+    centre; sign from the interpolated normal) -> (height, closest skin point, unit direction away from the skin)."""
+    P, N, F, tree = surface(tgt)
+    h, q, n = np.zeros(len(X)), np.zeros_like(X), np.zeros_like(X)
+    for s in range(
+        0, len(X), 20000
+    ):  # in blocks: the k candidate triangles per point take memory
+        x = X[s : s + 20000]
+        ti = tree.query(x, k=k)[1]
+        f = F[ti]
+        U = closest_on_triangles(x[:, None], P[f[..., 0]], P[f[..., 1]], P[f[..., 2]])
+        c = (U[..., None] * P[f]).sum(-2)
+        dd = np.linalg.norm(x[:, None] - c, axis=-1)
+        best = dd.argmin(1)
+        r = np.arange(len(x))
+        cq, u, fb = c[r, best], U[r, best], f[r, best]
+        nn = (u[:, :, None] * N[fb]).sum(1)
+        sg = np.sign(((x - cq) * nn).sum(1))
+        sg[sg == 0] = 1
+        d = x - cq
+        ln = np.linalg.norm(d, axis=1)
+        dirn = np.where(
+            (ln > 1e-7)[:, None], d / np.maximum(ln, 1e-12)[:, None] * sg[:, None], nn
+        )
+        h[s : s + 20000], q[s : s + 20000] = dd[r, best] * sg, cq
+        n[s : s + 20000] = dirn / np.linalg.norm(dirn, axis=1, keepdims=True)
+    return h, q, n
+
+
+def crossings(inner, outer, tgt, reach=0.006):
+    """Outer-layer vertices lower than the inner layer over the same skin spot (at least 3 inner vertices with their
+    foot within `reach` m, below their mean height), within 6 cm of the skin. -> (compared, below)."""
+    hi, fi, _ = skin_height(inner, tgt)
+    keep = np.abs(hi) < 0.06
+    hi, ftree = hi[keep], cKDTree(fi[keep])
+    ho, fo, _ = skin_height(outer, tgt)
+    cmp = below = 0
+    for i, L in enumerate(ftree.query_ball_point(fo, reach)):
+        if len(L) >= 3 and abs(ho[i]) < 0.06:
+            cmp += 1
+            below += bool(ho[i] < hi[L].mean())
+    return cmp, below
+
+
+def refit_parts(parts, src, tgt, inner=None):
+    """move() + layer_push() for the parts of one mesh: parts = [(LOD key, positions)], inner = {LOD key: inner layer
+    positions} (a LOD the inner layers lack uses their LOD 1). -> ([new positions], pushed out of the skin, lifted
+    over the inner layers)."""
+    out, pushed, lifted = [], 0, 0
+    for lod, P in parts:
+        Q, n = move(P, src, tgt)
+        if inner:
+            lifted += layer_push(Q, inner.get(lod, inner.get(1)), tgt)
+        out.append(Q)
+        pushed += n
+    return out, pushed, lifted
+
+
+def lod_of(name):
+    """LOD number of a WolvenKit glb mesh name ('submesh_00_LOD_1' -> 1)."""
+    m = re.search(r"LOD_(\d+)", name or "")
+    return int(m.group(1)) if m else 1
+
+
+def refit_glb(gar, out, src, tgt, inner=None):
+    """refit_parts() applied to a WolvenKit glb export. Only POSITION bytes change: indices, UVs, weights, normals and
+    morph targets stay identical. -> (vertices, pushed out of the skin, lifted over inner layers, [(LOD, new
+    positions)])."""
     d, j, b = load(gar)
-    inside = total = 0
-    for m in j["meshes"]:
-        for pr in m["primitives"]:
-            ai = pr["attributes"]["POSITION"]
-            P = read(d, j, b, ai)
-            Q, bad = move(P, src, tgt)
-            write(d, j, b, ai, Q)
-            inside += bad
-            total += len(P)
+    acc = [
+        (lod_of(m.get("name")), pr["attributes"]["POSITION"])
+        for m in j["meshes"]
+        for pr in m["primitives"]
+    ]
+    parts = [(lod, read(d, j, b, ai)) for lod, ai in acc]
+    Qs, inside, lifted = refit_parts(parts, src, tgt, inner)
+    for (_, ai), Q in zip(acc, Qs):
+        write(d, j, b, ai, Q)
     jb = json.dumps(j, separators=(",", ":")).encode()
     jb += b" " * ((4 - len(jb) % 4) % 4)
     rest = d[20 + struct.unpack_from("<I", d, 12)[0] :]
     body = struct.pack("<II", len(jb), 0x4E4F534A) + jb + rest
     open(out, "wb").write(struct.pack("<III", 0x46546C67, 2, 12 + len(body)) + body)
-    return total, inside
+    return (
+        sum(len(P) for _, P in parts),
+        inside,
+        lifted,
+        [(lod, Q) for (lod, _), Q in zip(parts, Qs)],
+    )
 
 
 def glb_points(glb):
@@ -410,6 +607,7 @@ class OwnMesh:
         self.bmin, self.bmin_at = self.vec(bb.get("Min"))
         self.bmax, self.bmax_at = self.vec(bb.get("Max"))
         self.spans = []  # (byte offset of the first position, stride, vertex count) per render chunk
+        self.lods = []  # LOD number per render chunk
         for c in self.array(h["renderChunkInfos"]):
             cv = self.struct(c["chunkVertices"][1])[0]
             vl = self.struct(cv["vertexLayout"][1])[0]
@@ -425,6 +623,8 @@ class OwnMesh:
             self.spans.append(
                 (off[0] if off else 0, stride[0], self.num(c, "numVertices", "H"))
             )
+            lm = self.num(c, "lodMask", "B")  # lowest LOD bit = WolvenKit's LOD_<n>
+            self.lods.append((lm & -lm).bit_length() or 1)
         assert self.spans and (self.qs > 0).all(), "no render chunks"
         self.bidx = (
             struct.unpack_from("<I", d, blob["renderBuffer"][1])[0] & 0xFFFF
@@ -626,13 +826,175 @@ def recover_names(src, arcs):
     return found, len(bins) - found
 
 
+# ---------------- garment layers: which garment of an outfit is worn over which ----------------
+
+# ArchiveXL / Equipment-EX outfit slots that are clothing layers: (group, garmentOffset = the game's layer order,
+# from Equipment-EX's slot list). Torso garments are layered among themselves, legs among themselves (a top can be
+# tucked in or worn over the trousers, so torso vs legs is left alone), full-body garments with both.
+LAYER_SLOTS = {
+    "TorsoUnder": ("torso", 120000),
+    "TorsoInner": ("torso", 150000),
+    "TorsoMiddle": ("torso", 180000),
+    "TorsoOuter": ("torso", 210000),
+    "TorsoAux": ("torso", 240000),
+    "LegsInner": ("legs", 130000),
+    "LegsMiddle": ("legs", 160000),
+    "LegsOuter": ("legs", 190000),
+    "BodyUnder": ("body", 110000),
+    "BodyInner": ("body", 140000),
+    "BodyMiddle": ("body", 170000),
+    "BodyOuter": ("body", 300000),
+}
+# Items without placementSlots: the slot Equipment-EX gives their base item's equipment area
+BASE_SLOT = {
+    "GenericInnerChestClothing": "TorsoInner",
+    "GenericOuterChestClothing": "TorsoOuter",
+    "GenericLegClothing": "LegsMiddle",
+}
+RECORD = re.compile(r"^(?=\S)[^#\n]*:[ \t]*$", re.M)  # a top-level TweakXL record
+DEPOT_REF = re.compile(r'"\$value":\s*"([^"]+\.(?:ent|app|mesh))"', re.I)
+
+
+def norm_path(p):
+    return p.replace("\\\\", "\\").lstrip("*").replace("/", "\\").lower()
+
+
+def tweak_items(paths):
+    r"""(entityName pattern, outfit slot) of every clothing record with a layer slot in the .yaml files that come with
+    the outfit: r6\tweaks next to the archive\pc\mod folder the files are in; for loose files, .yaml and r6\tweaks
+    beside them or one folder up."""
+    files = set()
+    for p in paths:
+        d = os.path.dirname(os.path.abspath(p))
+        parts = d.split(os.sep)
+        low = [x.lower() for x in parts]
+        i = next(
+            (
+                k
+                for k in range(len(low) - 2)
+                if low[k : k + 3] == ["archive", "pc", "mod"]
+            ),
+            None,
+        )
+        roots = (
+            [d, os.path.dirname(d)] if i is None else [os.sep.join(parts[:i]) + os.sep]
+        )
+        for r in roots:
+            if i is None:
+                files.update(glob.glob(os.path.join(r, "*.y*ml")))
+            tw = os.path.join(r, "r6", "tweaks", "**", "*.y*ml")
+            files.update(glob.glob(tw, recursive=True))
+    items = []
+    for f in sorted(files):
+        try:
+            t = open(f, encoding="utf-8", errors="ignore").read()
+        except OSError:
+            continue
+        starts = [m.start() for m in RECORD.finditer(t)] + [len(t)]
+        for a, b in zip(starts, starts[1:]):
+            blk = t[a:b]
+            en = re.search(r"^\s+entityName:\s*['\"]?([^'\"\s#]+)", blk, re.M)
+            if not en:
+                continue
+            sl = re.search(r"OutfitSlots\.(\w+)", blk)
+            base = re.search(r"\$base:\s*['\"]?Items\.(\w+)", blk)
+            slot = sl.group(1) if sl else BASE_SLOT.get(base.group(1)) if base else None
+            if slot in LAYER_SLOTS:
+                pat = ".*".join(map(re.escape, re.split(r"\$\{[^}]*\}", en.group(1))))
+                items.append((re.compile(pat, re.I), slot))
+    return items
+
+
+def garment_slots(src, js, items, sx, wk, game):
+    r"""{mesh path (as in src, source body's member for {body} meshes): outfit slot} for the meshes of the outfit's
+    clothing records `items`: record entityName -> the ArchiveXL factory .csv's .ent -> every .ent / .app it refers to
+    (serialized JSON in js, mirroring src) -> meshes. A mesh claimed by records with different slots gets none.
+    ponytail: one .app shared by several items gives all of them all its meshes (-> no slot, no layer push); add
+    appearance-name matching if such outfits need it."""
+    if not items:
+        return {}
+    names = {}
+    csvd = os.path.join(js, "_csv")
+    os.makedirs(csvd, exist_ok=True)
+    for c in glob.glob(os.path.join(src, "**", "*.csv"), recursive=True):
+        try:
+            run([wk, "convert", "serialize", c, "-o", csvd], game)
+            rows = (
+                json.load(
+                    open(
+                        os.path.join(csvd, os.path.basename(c) + ".json"),
+                        encoding="utf-8-sig",
+                    )
+                )["Data"]["RootChunk"].get("compiledData")
+                or []
+            )
+        except (RuntimeError, OSError, ValueError, KeyError, TypeError):
+            continue
+        for r in rows:
+            if len(r) >= 2 and str(r[1]).lower().endswith(".ent"):
+                names[str(r[0]).lower()] = norm_path(str(r[1]))
+    refs = {}
+    for f in glob.glob(os.path.join(js, "**", "*.json"), recursive=True):
+        rel = os.path.relpath(f, js)
+        if not rel.lower().startswith("_csv"):
+            text = open(f, encoding="utf-8", errors="ignore").read()
+            refs[rel[:-5].lower()] = {norm_path(m) for m in DEPOT_REF.findall(text)}
+    claims = {}
+    for rx, slot in items:
+        for name, root in names.items():
+            if not rx.fullmatch(name):
+                continue
+            seen, todo = set(), [root]
+            while todo:
+                n = todo.pop()
+                if n in seen:
+                    continue
+                seen.add(n)
+                for r in refs.get(n, ()):
+                    if r.endswith(".mesh"):
+                        m = r.replace("{gender}", "w").replace("{body}", sx)
+                        claims.setdefault(m, set()).add(slot)
+                    else:
+                        todo.append(r)
+    return {m: s.pop() for m, s in claims.items() if len(s) == 1}
+
+
+def under(a, b):
+    """True when a garment in slot a is worn under one in slot b (same group or a full-body garment, lower layer)."""
+    (ga, ra), (gb, rb) = LAYER_SLOTS[a], LAYER_SLOTS[b]
+    return ra < rb and (ga == gb or "body" in (ga, gb))
+
+
+def inner_layers(slot, worn):
+    """{LOD: positions} of the refit garments in `worn` [(slot, [(LOD, positions)])] worn under a garment in `slot`,
+    None when there are none."""
+    acc = {}
+    for s2, parts in worn if slot in LAYER_SLOTS else ():
+        if under(s2, slot):
+            for lod, Q in parts:
+                acc.setdefault(lod, []).append(Q)
+    return {k: np.vstack(v) for k, v in acc.items()} or None
+
+
 # ---------------- one outfit ----------------
 
 
 def refit_mod(
-    arcs, name, work, out, src_body, tgt, cages, wk, game, log, progress=lambda f: None
+    arcs,
+    name,
+    work,
+    out,
+    src_body,
+    tgt,
+    cages,
+    wk,
+    game,
+    log,
+    progress=lambda f: None,
+    origin=None,
 ):
     """arcs: the outfit's .archive files, made for body src_body; refit to body tgt (body tags; cages: {tag: glbs}).
+    origin: files whose surroundings hold the outfit's r6\\tweaks .yaml (default arcs), for the garment layers.
     -> path of the written refit archive, or None if nothing needed a refit.
     Raises ToolError when nothing could be refit or the final safety check fails."""
     sx, tx = xl_name(src_body), xl_name(tgt)
@@ -674,14 +1036,18 @@ def refit_mod(
     for f in glob.glob(os.path.join(src, "**", "*.ent"), recursive=True) + glob.glob(
         os.path.join(src, "**", "*.app"), recursive=True
     ):
+        od = os.path.join(js, os.path.dirname(os.path.relpath(f, src)))
+        os.makedirs(
+            od, exist_ok=True
+        )  # mirrored: two .app files of the same name don't overwrite each other
         try:
-            run([wk, "convert", "serialize", f, "-o", js], game)
+            run([wk, "convert", "serialize", f, "-o", od], game)
         except RuntimeError:
             log(
                 "  (could not read %s, an old file format; its meshes are treated as fixed)"
                 % os.path.basename(f)
             )
-    for f in glob.glob(os.path.join(js, "*.json")):
+    for f in glob.glob(os.path.join(js, "**", "*.json"), recursive=True):
         for m in re.finditer(
             r"\*?[A-Za-z0-9_\\/.\-{}]+\{body\}[A-Za-z0-9_\\/.\-{}]*\.mesh",
             open(f, encoding="utf-8", errors="ignore").read(),
@@ -730,6 +1096,22 @@ def refit_mod(
         "Refitting %d mesh(es) from %s to %s ..."
         % (len(jobs), body_name(src_body), body_name(tgt))
     )
+    slots = {}
+    if len(jobs) > 1:
+        slots = garment_slots(src, js, tweak_items(origin or arcs), sx, wk, game)
+        slots = {s: slots[s] for s, _ in jobs if s in slots}
+        rank = lambda s: LAYER_SLOTS[slots[s]][1] if s in slots else 0
+        jobs.sort(key=lambda st: rank(st[0]))  # inner layers first
+        if any(under(a, b) for a in slots.values() for b in slots.values()):
+            log(
+                "Garment layers (inner first): %s. Each layer is kept 1 mm above the ones under it."
+                % ", ".join(
+                    "%s (%s)" % (os.path.splitext(os.path.basename(s))[0], slots[s])
+                    for s, _ in jobs
+                    if s in slots
+                )
+            )
+    worn = []  # (slot, [(LOD, refit positions)]) of the refit garments with a layer slot
     done, glbs = [], {}
     for n, (s, t) in enumerate(jobs):
         progress(0.8 * n / len(jobs))
@@ -754,19 +1136,25 @@ def refit_mod(
         tdir = os.path.dirname(t)
         os.makedirs(os.path.join(raw, tdir), exist_ok=True)
         os.makedirs(os.path.join(pack, tdir), exist_ok=True)
-        if own:
-            Q, pushed = move(pts, cages[src_body], cages[tgt])
+        inner = inner_layers(slots.get(s), worn)
+        lift = lambda k: ", %d lifted over the layer under it" % k if k else ""
+        if own:  # split by render chunk: each chunk's LOD meets the same LOD of the inner layers
+            cut = np.cumsum([n for _, _, n in own.spans])[:-1]
+            parts = list(zip(own.lods, np.split(pts, cut)))
+            Qs, pushed, lifted = refit_parts(parts, cages[src_body], cages[tgt], inner)
             try:
-                data = own_refit(own, from_glb_space(Q))
+                data = own_refit(own, from_glb_space(np.vstack(Qs)))
             except Exception as e:
                 skipped.append((s, "could not be written safely (%s)" % str(e)[:200]))
                 continue
             open(os.path.join(pack, t), "wb").write(data)
             log(
-                "  %s: %d vertices moved, %d pushed out of the skin (read with the tool's own reader, old file "
-                "format)" % (os.path.basename(t), len(Q), pushed)
+                "  %s: %d vertices moved, %d pushed out of the skin%s (read with the tool's own reader, old file "
+                "format)" % (os.path.basename(t), len(pts), pushed, lift(lifted))
             )
             done.append((s, t))
+            if s in slots:
+                worn.append((slots[s], [(lod, Q) for (lod, _), Q in zip(parts, Qs)]))
             continue
         tglb = os.path.join(raw, os.path.splitext(t)[0] + ".glb")
         g2 = os.path.join(
@@ -775,13 +1163,17 @@ def refit_mod(
         os.makedirs(os.path.dirname(g2), exist_ok=True)
         shutil.copy(g, g2)
         glbs[t] = (g2, tglb)
-        nv, pushed = refit_glb(g, tglb, cages[src_body], cages[tgt])
+        nv, pushed, lifted, parts = refit_glb(
+            g, tglb, cages[src_body], cages[tgt], inner
+        )
         log(
-            "  %s: %d vertices moved, %d pushed out of the skin"
-            % (os.path.basename(t), nv, pushed)
+            "  %s: %d vertices moved, %d pushed out of the skin%s"
+            % (os.path.basename(t), nv, pushed, lift(lifted))
         )
         shutil.copy(meshes[s], os.path.join(pack, t))
         done.append((s, t))
+        if s in slots:
+            worn.append((slots[s], parts))
     if glbs:
         imp = run([wk, "import", raw, "-o", pack, "-k"], game, ok="Imported")
         m = re.search(r"Imported (\d+)/(\d+)", imp)

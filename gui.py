@@ -115,6 +115,9 @@ Good to know
 - The refit only works together with the original outfit. With Install ticked, the tool checks your game and installs the original if it is missing. An original that is already installed is left as it is.
 - Refits are for your own game. Don't upload refits of other people's outfits without the outfit author's permission.
 - If something is skipped (for example glasses or props), the log says so; the rest of the outfit is still refit.
+- Outfits with several layers (for example a top, a shirt and a jacket): the tool keeps each layer 1 mm above the one under it, so the shirt doesn't poke through the jacket. It knows the order from the outfit's own files (when the outfit uses ArchiveXL outfit slots such as TorsoUnder / TorsoMiddle / TorsoOuter). Add the outfit's download, not only its .archive, so the tool can read them.
+- Chest size: Hyst tells you to set V's chest size ('Breast') to 'Big' for Angel. That setting changes how V looks nude; in clothes her chest is the same with every setting, so refits fit all of them.
+- Hyst says that rig mods which change the breast area (for example "All the Rigs") make some clothes clip with Angel and EVE. This tool can't fix that.
 - 'WolvenKit...' lets you use a WolvenKit you already have instead of downloading it.
 
 Having a problem?

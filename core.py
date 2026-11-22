@@ -25,7 +25,7 @@ if (
     except OSError:
         DATA = _OLD_DATA
 
-VERSION = "1.5"
+VERSION = "1.6"
 
 
 def documents_dir():
@@ -1046,6 +1046,10 @@ def run_batch(
                 game,
                 log,
                 lambda f: progress((i + f) / len(inputs)),
+                # a single .archive is copied: its yaml (garment layers) is beside the original
+                [inp]
+                if os.path.isfile(inp) and inp.lower().endswith(".archive")
+                else arcs,
             )
             missing = bool(res) and original_missing(arcs, game)
             if res and do_install:

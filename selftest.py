@@ -9,6 +9,9 @@ with refits you trust (e.g. ones made by hand).
     'exact' = fail unless it is 0 (an unchanged refit).
 --compare A=B: vertex distance between two archives (information).
 --roundtrip TAG=OUTFIT[=MAX_MEAN_MM]: vanilla -> TAG -> vanilla, compared with the vanilla original.
+--layers TAG=OUTFIT=STEM,STEM,...: garment layers (mesh stems inner -> outer): outer-layer vertices below an inner
+    layer in 1.5 (recomputed) and in the output (must be 0).
+--chest TAG=OUTFIT: garment vertices inside the body as the game shows it in clothes (must be 0).
 --gui-source DIR --gui-source-outfit ANGEL_OUTFIT [--gui-source-body eve=DOWNLOAD]: 'Outfit made for' tests in the
     real window (pre-fill, wrong source, same body twice, missing source body, body from a download, 'Body file...',
     closing mid-refit).
@@ -1305,6 +1308,118 @@ def support_tests(core, gui, a, log, fails):
         )
 
 
+def stacked(pos, end):
+    """All positions of the mesh in pos ({mesh path: [positions per primitive]}) whose name ends with end."""
+    import numpy as np
+
+    k = [x for x in pos if x.endswith(end)]
+    assert len(k) == 1, (end, k)
+    return np.vstack(pos[k[0]])
+
+
+def layer_test(core, wk, game, spec, run_case, seen, barch, log, fails):
+    """--layers TAG=OUTFIT=STEM,STEM,...: refit a vanilla outfit with garment layers (stems inner -> outer, e.g.
+    casual_pt5_top,casual_pt5_top1,casual_pt5_jacket) and count outer-layer vertices below an inner layer: in the
+    1.5 refit (move() alone, recomputed from the original) and in the output (expected 0). Also how far each
+    garment moved compared with 1.5 (innermost: unchanged)."""
+    import numpy as np
+    import refit
+
+    tag, inp, stems = spec.split("=")
+    stems = stems.split(",")
+    log("\n### garment layers, vanilla -> %s: %s" % (tag, os.path.basename(inp)))
+    _, cages = core.setup(game, "vanilla", tag, log, body_files=barch)
+    work = tempfile.mkdtemp(prefix="lay_", dir=core._work_root())
+    try:
+        arch = run_case("vanilla", tag, inp, os.path.join(work, "out"))
+        if not arch:
+            return
+        ok = any(m.startswith("Garment layers (inner first): ") for m in seen)
+        log("  %s layers found in the outfit's files" % ("OK  " if ok else "FAIL"))
+        orig = core.prepare_input(inp, os.path.join(work, "in"), lambda m: None)
+        src = {}
+        for o in orig:
+            src.update(positions(wk, game, o, os.path.join(work, "p_src")))
+        dst = positions(wk, game, arch, os.path.join(work, "p_out"))
+        xl = core.xl_name(tag)
+        old = [
+            refit.move(
+                stacked(src, s + "_w_base_body.mesh"), cages["vanilla"], cages[tag]
+            )[0]
+            for s in stems
+        ]
+        new = [stacked(dst, s + "_w_%s.mesh" % xl) for s in stems]
+        for s, b, n in zip(stems, old, new):
+            d = np.linalg.norm(n - b, axis=1) * 1000
+            h = lambda X: np.median(refit.skin_height(X, cages[tag])[0]) * 1000
+            log(
+                "  %-28s vs 1.5: moved max %.2f mm, mean %.3f mm, %d verts > 0.1 mm; median height over the skin "
+                "%.1f -> %.1f mm" % (s, d.max(), d.mean(), (d > 0.1).sum(), h(b), h(n))
+            )
+        bad = 0
+        for i in range(len(stems)):
+            for o in range(i + 1, len(stems)):
+                c0, b0 = refit.crossings(old[i], old[o], cages[tag])
+                c1, b1 = refit.crossings(new[i], new[o], cages[tag])
+                bad += b1
+                log(
+                    "  %s over %s: below the inner layer in 1.5 %d of %d (%.1f%%), in 1.6 %d of %d"
+                    % (stems[o], stems[i], b0, c0, 100.0 * b0 / max(c0, 1), b1, c1)
+                )
+        if not ok or bad:
+            log("FAIL: garment layers still cross (or were not found)")
+            fails.append("layers " + os.path.basename(inp))
+        else:
+            log("  garment layers OK: no outer layer below an inner one")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def chest_test(core, wk, game, spec, run_case, barch, log, fails):
+    """--chest TAG=OUTFIT: refit a vanilla outfit to TAG; no garment vertex may be inside the body as the game shows it
+    in clothes (the full body mesh as it is; for Angel the same with every chest size), triangle-exact, within 6 cm of
+    the skin. Prints the fit on the chest."""
+    import numpy as np
+    import refit
+
+    tag, inp = spec.split("=")
+    log("\n### clothed chest, vanilla -> %s: %s" % (tag, os.path.basename(inp)))
+    _, cages = core.setup(game, "vanilla", tag, log, body_files=barch)
+    work = tempfile.mkdtemp(prefix="chest_", dir=core._work_root())
+    try:
+        arch = run_case("vanilla", tag, inp, os.path.join(work, "out"))
+        if not arch:
+            fails.append("chest " + os.path.basename(inp))
+            return
+        pos = positions(wk, game, arch, os.path.join(work, "p"))
+        bad = 0
+        for name, parts in sorted(pos.items()):
+            P = np.vstack(parts)
+            h = refit.skin_height(P, cages[tag])[0]
+            near = np.abs(h) < 0.06
+            band = near & (P[:, 1] > 1.22) & (P[:, 1] < 1.45)
+            bad += int((h[near] < 0).sum())
+            log(
+                "  %-44s inside %d of %d near the body%s"
+                % (
+                    os.path.basename(name),
+                    int((h[near] < 0).sum()),
+                    int(near.sum()),
+                    "; chest gap median %.1f mm, 90th pct %.1f mm"
+                    % (np.median(h[band]) * 1000, np.percentile(h[band], 90) * 1000)
+                    if band.sum() > 100
+                    else "",
+                )
+            )
+        if bad:
+            log("FAIL: %d garment vertices inside the clothed body" % bad)
+            fails.append("chest " + os.path.basename(inp))
+        else:
+            log("  clothed chest OK: nothing inside the body")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def main(a):
     if opt(a, "--home"):
         os.environ["BODYREFIT_HOME"] = os.path.abspath(opt(a, "--home"))
@@ -1396,10 +1511,15 @@ def main(a):
             log("FAIL body %s: %s" % (t, e))
             fails.append(t)
 
+    seen = []  # log lines of the last run_case
+
     def run_case(src, tag, inp, dest):
         """One refit like the window does it, plus the safety check of the output. -> output archive or None."""
         log("\n### case %s: %s -> %s" % (os.path.basename(inp), src, tag))
-        res = core.run_batch([inp], tag, game, dest, log, body_files=barch, src=src)
+        seen[:] = []
+        res = core.run_batch(
+            [inp], tag, game, dest, lambda m: (seen.append(m), log(m)), body_files=barch, src=src
+        )
         arch = res[0][1]
         if not arch:
             log("FAIL: no output (%s)" % res[0][2])
@@ -1468,6 +1588,18 @@ def main(a):
                 fails.append("roundtrip " + os.path.basename(inp))
         finally:
             shutil.rmtree(rt, ignore_errors=True)
+    for c in opt_all(a, "--layers"):
+        try:
+            layer_test(core, wk, game, c, run_case, seen, barch, log, fails)
+        except Exception:
+            log("FAIL: layer test crashed:\n" + traceback.format_exc())
+            fails.append("layers " + c)
+    for c in opt_all(a, "--chest"):
+        try:
+            chest_test(core, wk, game, c, run_case, barch, log, fails)
+        except Exception:
+            log("FAIL: clothed chest test crashed:\n" + traceback.format_exc())
+            fails.append("chest " + c)
     if "--gui" in a:
         try:
             import gui

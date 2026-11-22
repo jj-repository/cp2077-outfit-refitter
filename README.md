@@ -145,6 +145,15 @@ It contains no file contents, and your Windows user name is replaced. You can op
   also replaces the same clothing, whichever loads first wins.
 - **Re-run after updates**: if the clothing mod or your body mod gets updated, refit the outfit again.
 - **Gloves and tight hands** can look a little puffy, because the tool pushes clothing slightly out of the skin.
+- **Layered outfits** (since 1.6): when an outfit has several layers, for example a top, a shirt over it and a
+  jacket, the tool keeps each layer 1 mm above the ones under it, so inner layers don't poke through. It reads the
+  order from the outfit's own files (ArchiveXL outfit slots like TorsoUnder / TorsoMiddle / TorsoOuter in its
+  `r6\tweaks` file). Add the whole download (or the `.archive` from your game folder), not a loose `.archive`
+  without its tweak file, so the tool can find them. Outfits without that information are refit as before.
+- **Chest size**: Hyst tells you to set V's chest size (*Breast*) to *Big* for Angel. That setting changes how V looks
+  nude; in clothes her chest is the same with every setting, so refits fit all of them.
+- **Rig mods that change the breast area** (for example "All the Rigs"): Hyst says they make some clothes clip with
+  these bodies. The tool can't fix that.
 
 ## Please respect the authors
 
@@ -188,8 +197,35 @@ the WolvenKit team or Nexus Mods.
    clothing vertex moves by the inverse-distance-weighted offset of its 8 nearest source body vertices.
    Vertices that end up inside the target body are pushed out to 4 mm above the skin.
    Only positions change: UVs, skin weights, normals and morph targets stay the same.
-   All supported bodies share the vanilla body's topology, so every pair is one direct step (Angel → EVE does
-   not go over vanilla, which would add the error and the push-out twice).
+   Every pair is one direct step (Angel → EVE does not go over vanilla, which would add the error and the
+   push-out twice).
+   - **Garment layers** (1.6): the outfit's TweakXL records (`r6\tweaks\*.yaml` of the download, or of the game
+     folder for an installed `.archive`) give each item its ArchiveXL / Equipment-EX outfit slot (`placementSlots`,
+     else the slot Equipment-EX gives its base item: inner chest → TorsoInner, outer chest → TorsoOuter, legs →
+     LegsMiddle). Item → meshes: `entityName` → the ArchiveXL factory `.csv` → `.ent` → every `.ent` / `.app` it
+     refers to → meshes (`{gender}` = `w`, `{body}` = the source body). Layer order = Equipment-EX's
+     `garmentOffset`. Torso slots are layered among themselves, legs among themselves (a top can be tucked in or
+     worn over the trousers, so torso vs legs is left alone), Body slots with both. Garments are refit inner first;
+     each outer vertex is lifted along the target body's normal to 1 mm above the highest inner-layer vertex over
+     the same skin spot (at least 3 inner vertices whose foot point on the skin is within 6 mm; up to 4 passes; same
+     LOD). Meshes without a known slot, or claimed by items with different slots (one `.app` shared by several
+     items), are not layered. Works the same for static and `{body}` outfits and for the own mesh reader
+     (old-format meshes; LOD from each render chunk's `lodMask`).
+   - **Chest size** (checked for 1.6). Target: the body mesh as it is = V's clothed chest, with every chest size
+     setting; same as 1.0-1.5. Evidence (2026-11, from files; not checked in game): hand-made Angel garments clear
+     the full mesh as it is and not the morphed chest. Over 309,000 chest-band vertices of Peachu's ANGEL tops, the
+     JoyToy minidress and xBaebsae's (Angel co-author) vanilla-clothing refits, 2.1 % are deeper than 1 mm inside the
+     full mesh (Peachu's nine current tops: 0.0 % each), 4.3 % inside full + the character creator's `breast_big`
+     morph, 6.2 % inside full + 2 x it; Hyst's own Angel garments: 0.0 % vs 2.0-6.3 %. Their authors use Hyst's
+     recommended chest size *Big*, so with *Big* the clothed chest is the full mesh; with *Default* (morph weight 0)
+     the nude chest is the full mesh, and morph weights can't go below 0, so the clothed chest is the full mesh too
+     (full minus the Big morph, tried as a 'Default' target, folds the under-bust crease: 62 inverted triangles).
+     *Big* only changes V nude (full + Big has the same chest as Angel's `femv_boobs_natural` mesh), which is the
+     "toggleable chest" Hyst asks for *Big* for. Angel's body mesh has a `GarmentSupport` shape key equal to
+     `breast_big` (max difference 0.04 mm); vanilla's points the other way (about minus `breast_big` on the chest).
+     Angel's other chest meshes (`femv_boobs_squish` / `femv_boobs_natural`) replace the chest only under garments
+     that carry the visual tags `hyst_boobs_*` (`ANGEL.xl`), which vanilla clothing doesn't. EVE: no GarmentSupport
+     shape key, `breast_big` at most 6.8 mm (median 1.1 mm).
 5. WolvenKit imports the moved positions back into a copy of the original mesh.
 6. WolvenKit 9.1.1 can write very big mesh buffers (over ~1.4 MB) in a way the game can't read.
    Those meshes are rebuilt directly (positions written into the original render buffer, compressed
@@ -240,7 +276,7 @@ Output (`<Body>` = the target: `Angel`, `Eve`, `Vanilla`):
 | `outfit_refitter.py` | Entry point: window, `--refit` command line, `--selftest` |
 | `gui.py` | The window (Python's built-in tkinter) |
 | `core.py` | Game detection, WolvenKit download, body shapes, unpacking downloads, install list |
-| `refit.py` | The refit itself, the WolvenKit buffer repair, the own mesh reader (old meshes), the final safety check |
+| `refit.py` | The refit itself (incl. garment layers), the WolvenKit buffer repair, the own mesh reader (old meshes), the final safety check |
 | `rdar.py` | Reading `.archive` / CR2W files, the game's Oodle library, buffer checks |
 | `bodies.json` | Supported bodies (source and target): names, ArchiveXL names, body file patterns, name hints |
 | `support.py` | The session record and the support report |
@@ -276,7 +312,12 @@ python outfit_refitter.py --selftest --home <empty folder> --out <folder>
        [--body-archive eve=<path to 05_Hyst_EVE_BODY.archive>]
        [--case angel=<outfit>=<a refit you trust.archive>[=exact]] [--case angel>vanilla=<Angel outfit>[=<reference>]] ...
        [--compare <a.archive>=<b.archive>] [--roundtrip angel=<vanilla outfit>[=<max mean mm>]]
+       [--layers angel=<vanilla outfit>=<inner stem>,<stem>,<outer stem>] [--chest angel=<vanilla outfit>]
 ```
+
+`--layers` refits a layered outfit and counts outer-layer vertices below an inner layer, in the 1.5 result
+(recomputed) and in the output (must be 0); `--chest` refits an outfit and counts garment vertices inside the
+body as the game shows it in clothes (must be 0).
 
 It checks the download-variant selection and the source-body logic (name guess, wrong-body warning, picking a
 download's version, body file checks), detects the game, downloads and checks WolvenKit into `--home`
