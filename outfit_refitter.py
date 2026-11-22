@@ -2,9 +2,11 @@ r"""Outfit Refitter: refit Cyberpunk 2077 clothing mods to the body mod you use.
 
 outfit_refitter.py [outfit ...]                      open the window (files dropped on the exe are pre-added)
 outfit_refitter.py --refit OUTFIT... --body angel [--from vanilla] [--body-file TAG=FILE] [--install] [--out DIR]
-                   [--game DIR]
+                   [--game DIR] [--replace-own] [--copy-moves]
     --body: the body to refit to, --from: the body the outfit is made for (vanilla, angel, eve; default vanilla),
-    --body-file: a body's .archive or download when it is not installed in the game.
+    --body-file: a body's .archive or download when it is not installed in the game,
+    --replace-own: also refit parts the outfit already has a version for that body of, and replace that version,
+    --copy-moves: clothing close to the body gets the body's movement (helps with rig / breast physics mods).
 outfit_refitter.py --selftest ...                    see selftest.py
 outfit_refitter.py --version
 In the windowed .exe, --refit / --selftest / --version output goes to %TEMP%\OutfitRefitter_console.log.
@@ -39,6 +41,8 @@ def cli_refit(a):
         do_install="--install" in a,
         body_files=body_files,
         src=opt(a, "--from", "vanilla"),
+        replace_own="--replace-own" in a,
+        copy_moves="--copy-moves" in a,
     )
     return 0 if all(r[1] or r[2] == "nothing to refit" for r in res) else 1
 

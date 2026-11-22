@@ -144,6 +144,20 @@ def move(P, src, tgt, off=0.004):
     w /= w.sum(1, keepdims=True)
     Q = P + (disp[nb] * w[..., None]).sum(1)
     bad = push_out(Q, (ttree, T, TN), off)
+    # the nearest body vertex's normal misses curved spots (EVE's crotch: up to 2.6 mm inside after the push above),
+    # so vertices close to the skin are checked again against the exact surface and lifted to `off` above it
+    for _ in range(2):
+        _, k = ttree.query(Q)
+        near = np.where(((Q - T[k]) * TN[k]).sum(1) < 0.01)[0]
+        if not len(near):
+            break
+        h, q, n = skin_height(Q[near], tgt)
+        # ponytail: only shallow misses (> -1.5 cm); deeper ones are the outfit's own hidden parts, left alone
+        low = (h < off * 0.5) & (h > -0.015)
+        if not low.any():
+            break
+        Q[near[low]] = q[low] + n[low] * off
+        bad[near[low]] = True
     return Q, int(bad.sum())
 
 
@@ -254,11 +268,13 @@ def read_index(d, j, b, ai):
     return np.frombuffer(bytes(d), dt, a["count"], start).astype(np.int64)
 
 
-def skin_height(X, tgt, k=24):
+def skin_height(X, tgt, k=24, faces=False):
     """Signed distance of points X to body tgt's surface (closest point on its triangles, among the k nearest by
-    centre; sign from the interpolated normal) -> (height, closest skin point, unit direction away from the skin)."""
+    centre; sign from the interpolated normal) -> (height, closest skin point, unit direction away from the skin);
+    faces=True: also (the closest triangle's vertex indices into surface(tgt), barycentric weights of the point)."""
     P, N, F, tree = surface(tgt)
     h, q, n = np.zeros(len(X)), np.zeros_like(X), np.zeros_like(X)
+    fv, bu = np.zeros((len(X), 3), np.int64), np.zeros((len(X), 3))
     for s in range(
         0, len(X), 20000
     ):  # in blocks: the k candidate triangles per point take memory
@@ -281,7 +297,8 @@ def skin_height(X, tgt, k=24):
         )
         h[s : s + 20000], q[s : s + 20000] = dd[r, best] * sg, cq
         n[s : s + 20000] = dirn / np.linalg.norm(dirn, axis=1, keepdims=True)
-    return h, q, n
+        fv[s : s + 20000], bu[s : s + 20000] = fb, u
+    return (h, q, n, fv, bu) if faces else (h, q, n)
 
 
 def crossings(inner, outer, tgt, reach=0.006):
@@ -297,6 +314,173 @@ def crossings(inner, outer, tgt, reach=0.006):
             cmp += 1
             below += bool(ho[i] < hi[L].mean())
     return cmp, below
+
+
+def _acc_layout(d, j, b, ai):
+    a = j["accessors"][ai]
+    bv = j["bufferViews"][a["bufferView"]]
+    dt = np.dtype(
+        {5121: "<u1", 5123: "<u2", 5125: "<u4", 5126: "<f4"}[a["componentType"]]
+    )
+    n = ACC_N[a["type"]]
+    start = b + bv.get("byteOffset", 0) + a.get("byteOffset", 0)
+    stride = bv.get("byteStride", dt.itemsize * n)
+    idx = (
+        start
+        + np.arange(a["count"])[:, None] * stride
+        + np.arange(dt.itemsize * n)[None, :]
+    )
+    return a, dt, n, idx
+
+
+def read_vals(d, j, b, ai):
+    """Any accessor as float64 (normalized integers as 0-1, joint indices as they are)."""
+    a, dt, n, idx = _acc_layout(d, j, b, ai)
+    raw = np.frombuffer(bytes(d), np.uint8)
+    X = (
+        raw[idx]
+        .reshape(a["count"], -1)
+        .view(dt)
+        .reshape(a["count"], n)
+        .astype(np.float64)
+    )
+    return X / np.iinfo(dt).max if a.get("normalized") and dt.kind == "u" else X
+
+
+def write_vals(d, j, b, ai, X):
+    """Write X into accessor ai of glb bytes d (in place), in the accessor's own number type."""
+    a, dt, n, idx = _acc_layout(d, j, b, ai)
+    if a.get("normalized") and dt.kind == "u":
+        X = np.round(np.clip(X, 0, 1) * np.iinfo(dt).max)
+    raw = np.frombuffer(d, np.uint8)  # d is a bytearray: writes go straight into it
+    raw[idx] = np.ascontiguousarray(X.astype(dt)).view(np.uint8).reshape(idx.shape)
+
+
+def prim_skin(d, j, b, pr):
+    """(joint indices, weights) of a primitive, all JOINTS_n / WEIGHTS_n sets side by side, or None."""
+    at = pr["attributes"]
+    sets = [i for i in range(4) if "JOINTS_%d" % i in at and "WEIGHTS_%d" % i in at]
+    if not sets:
+        return None
+    J = np.hstack([read_vals(d, j, b, at["JOINTS_%d" % i]) for i in sets]).astype(
+        np.int64
+    )
+    W = np.hstack([read_vals(d, j, b, at["WEIGHTS_%d" % i]) for i in sets])
+    return J, W, sets
+
+
+_BSKIN = {}
+
+
+def body_skin(paths):
+    """Skin weights of a body (glb paths joined with ';'), in surface()'s vertex order: -> (joint names, J (V, K)
+    indices into the names, W (V, K), {joint name: parent joint name}). Cached."""
+    if paths not in _BSKIN:
+        names, idx, Js, Ws, parent = [], {}, [], [], {}
+        for p in paths.split(";"):
+            d, j, b = load(p)
+            local = []
+            for ni in j["skins"][0]["joints"] if j.get("skins") else []:
+                nm = j["nodes"][ni].get("name")
+                idx.setdefault(nm, len(names))
+                if idx[nm] == len(names):
+                    names.append(nm)
+                local.append(idx[nm])
+            for nd in j["nodes"]:
+                for c in nd.get("children", []):
+                    parent.setdefault(j["nodes"][c].get("name"), nd.get("name"))
+            local = np.array(local or [0])
+            for m in j["meshes"]:
+                if "LOD_1" not in (m.get("name") or "LOD_1"):
+                    continue
+                for pr in m["primitives"]:
+                    sk = prim_skin(d, j, b, pr)
+                    n = j["accessors"][pr["attributes"]["POSITION"]]["count"]
+                    if sk is None:  # keep the vertex order of surface()
+                        Js.append(np.zeros((n, 1), np.int64))
+                        Ws.append(np.zeros((n, 1)))
+                    else:
+                        Js.append(local[sk[0]])
+                        Ws.append(sk[1])
+        K = max(x.shape[1] for x in Js)
+        pad = lambda X: np.hstack([X, np.zeros((len(X), K - X.shape[1]), X.dtype)])
+        _BSKIN[paths] = (
+            names,
+            np.vstack([pad(x) for x in Js]),
+            np.vstack([pad(x) for x in Ws]),
+            parent,
+        )
+    return _BSKIN[paths]
+
+
+def rigid(J, W):
+    """True for a rigid part (prop, buckle, scabbard, bag): every vertex is led by one of at most 2 bones (cloth on
+    the body is led by many: a top 12, trousers 28). ponytail: a naive heuristic; a part led by 3+ bones counts as
+    cloth."""
+    top = J[np.arange(len(J)), W.argmax(1)]
+    return len(np.unique(top)) <= 2
+
+
+def copy_weights(d, j, b, pr, Q, tgt, near=0.015, far=0.04):
+    """Give the garment vertices Q (refit positions of primitive pr, glb space) the skin weights of body tgt where they
+    sit close to it, so they move with the body (also with rig / breast physics mods that move the body's bones):
+    the weights at the closest point of the body's skin, fully within `near` m, fading to the garment's own weights
+    at `far` m; vertices further out (a hanging skirt, cloth bones) keep theirs. A body bone the garment's skin lacks
+    falls back to its nearest parent that the garment has. Writes the JOINTS_n / WEIGHTS_n accessors of glb bytes d
+    in place. -> vertices changed.
+    ponytail: the K strongest influences are kept (K = the garment's own count, usually 8)."""
+    sk = prim_skin(d, j, b, pr)
+    if sk is None or not j.get("skins"):
+        return 0
+    GJ, GW, sets = sk
+    if rigid(GJ, GW):  # a knife, a buckle, a bag: it must not bend like skin
+        return 0
+    gnames = [j["nodes"][ni].get("name") for ni in j["skins"][0]["joints"]]
+    gidx = {nm: i for i, nm in enumerate(gnames)}
+    bnames, BJ, BW, parent = body_skin(tgt)
+    gmap = np.full(len(bnames), -1)
+    for i, nm in enumerate(bnames):
+        x, hops = nm, 0
+        while x is not None and x not in gidx and hops < 64:
+            x, hops = parent.get(x), hops + 1
+        if x in gidx:
+            gmap[i] = gidx[x]
+    h, _, _, fv, bu = skin_height(Q, tgt, faces=True)
+    alpha = np.clip((far - np.abs(h)) / (far - near), 0, 1)
+    sel = np.nonzero(alpha > 0)[0]
+    if not len(sel):
+        return 0
+    n, K, G = len(sel), GJ.shape[1], len(gnames) + 1
+    cj = gmap[BJ[fv[sel]]].reshape(
+        n, -1
+    )  # 3 corners x their influences, as garment joints
+    cw = (BW[fv[sel]] * bu[sel][:, :, None]).reshape(n, -1)
+    cw[cj < 0], cj[cj < 0] = 0, 0
+    a = alpha[sel][:, None]
+    ids = np.hstack([cj, GJ[sel]])
+    ws = np.hstack([cw * a, GW[sel] * (1 - a)])
+    # sum per (vertex, joint), keep the K biggest per vertex, normalize
+    key = np.repeat(np.arange(n), ids.shape[1]) * G + ids.ravel()
+    uk, inv = np.unique(key, return_inverse=True)
+    sw = np.bincount(inv, ws.ravel())
+    ur, uj = uk // G, uk % G
+    o = np.lexsort((-sw, ur))
+    ur, uj, sw = ur[o], uj[o], sw[o]
+    rank = np.arange(len(ur)) - np.searchsorted(ur, np.arange(n))[ur]
+    k = (rank < K) & (sw > 1e-6)
+    NJ, NW = np.zeros((n, K), np.int64), np.zeros((n, K))
+    NJ[ur[k], rank[k]], NW[ur[k], rank[k]] = uj[k], sw[k]
+    tot = NW.sum(1)
+    ok = (
+        tot > 1e-6
+    )  # nothing left (no body bone known to the garment): keep the garment's own weights
+    NW[ok] /= tot[ok][:, None]
+    GJ[sel[ok]], GW[sel[ok]] = NJ[ok], NW[ok]
+    at = pr["attributes"]
+    for c, i in enumerate(sets):
+        write_vals(d, j, b, at["JOINTS_%d" % i], GJ[:, 4 * c : 4 * c + 4])
+        write_vals(d, j, b, at["WEIGHTS_%d" % i], GW[:, 4 * c : 4 * c + 4])
+    return int(ok.sum())
 
 
 def refit_parts(parts, src, tgt, inner=None):
@@ -319,20 +503,21 @@ def lod_of(name):
     return int(m.group(1)) if m else 1
 
 
-def refit_glb(gar, out, src, tgt, inner=None):
-    """refit_parts() applied to a WolvenKit glb export. Only POSITION bytes change: indices, UVs, weights, normals and
-    morph targets stay identical. -> (vertices, pushed out of the skin, lifted over inner layers, [(LOD, new
-    positions)])."""
+def refit_glb(gar, out, src, tgt, inner=None, weights=False):
+    """refit_parts() applied to a WolvenKit glb export. Only POSITION bytes change (and with weights=True the skin
+    weights near the body, copy_weights): indices, UVs, normals and morph targets stay identical.
+    -> (vertices, pushed out of the skin, lifted over inner layers, [(LOD, new positions)], vertices that got the
+    body's weights)."""
     d, j, b = load(gar)
-    acc = [
-        (lod_of(m.get("name")), pr["attributes"]["POSITION"])
-        for m in j["meshes"]
-        for pr in m["primitives"]
-    ]
+    prims = [(lod_of(m.get("name")), pr) for m in j["meshes"] for pr in m["primitives"]]
+    acc = [(lod, pr["attributes"]["POSITION"]) for lod, pr in prims]
     parts = [(lod, read(d, j, b, ai)) for lod, ai in acc]
     Qs, inside, lifted = refit_parts(parts, src, tgt, inner)
-    for (_, ai), Q in zip(acc, Qs):
+    copied = 0
+    for (_, ai), (_, pr), Q in zip(acc, prims, Qs):
         write(d, j, b, ai, Q)
+        if weights:
+            copied += copy_weights(d, j, b, pr, Q, tgt)
     jb = json.dumps(j, separators=(",", ":")).encode()
     jb += b" " * ((4 - len(jb) % 4) % 4)
     rest = d[20 + struct.unpack_from("<I", d, 12)[0] :]
@@ -343,6 +528,7 @@ def refit_glb(gar, out, src, tgt, inner=None):
         inside,
         lifted,
         [(lod, Q) for (lod, _), Q in zip(parts, Qs)],
+        copied,
     )
 
 
@@ -547,9 +733,10 @@ def from_glb(sm, g, tg, tmp, wk, game):
     return fixed
 
 
-def repair_buffers(done, meshes, pack, glbs, work, wk, game, log, skipped):
+def repair_buffers(done, meshes, pack, glbs, work, wk, game, log, skipped, moves=False):
     """WolvenKit 9.1.1 import can write big buffers (> ~1.4 MB) the game can't decode. Rebuild only those meshes;
-    a mesh that can't be rebuilt is dropped (listed as skipped)."""
+    a mesh that can't be rebuilt is dropped (listed as skipped). The rebuild writes positions only: moves=True
+    (copied skin weights) says so in the log."""
     import tempfile
 
     for s, t in list(done):
@@ -557,8 +744,8 @@ def repair_buffers(done, meshes, pack, glbs, work, wk, game, log, skipped):
         if t not in glbs or not rdar.bad_buffers(*rdar.loose_mesh(p), meshes[s]):
             continue
         log(
-            "  WolvenKit wrote a broken big buffer in %s; rebuilding it directly ..."
-            % os.path.basename(t)
+            "  WolvenKit wrote a broken big buffer in %s; rebuilding it directly%s ..."
+            % (os.path.basename(t), " (its movement can't be copied)" if moves else "")
         )
         tmp = tempfile.mkdtemp(prefix="fix_", dir=work)
         try:
@@ -992,9 +1179,16 @@ def refit_mod(
     log,
     progress=lambda f: None,
     origin=None,
+    replace_own=False,
+    copy_moves=False,
 ):
     """arcs: the outfit's .archive files, made for body src_body; refit to body tgt (body tags; cages: {tag: glbs}).
     origin: files whose surroundings hold the outfit's r6\\tweaks .yaml (default arcs), for the garment layers.
+    replace_own: also refit {body} parts the mod already has a target-body version of, and replace that version
+    (the output then loads first: '!!!').
+    copy_moves: clothing close to the body gets the body's skin weights (copy_weights), so it moves with the body,
+    also with rig / breast physics mods. Meshes written without WolvenKit's import (own reader, rebuilt big
+    buffers) keep their own weights; the log says so.
     -> path of the written refit archive, or None if nothing needed a refit.
     Raises ToolError when nothing could be refit or the final safety check fails."""
     sx, tx = xl_name(src_body), xl_name(tgt)
@@ -1064,8 +1258,19 @@ def refit_mod(
         s, t = pat.replace("{body}", sx), pat.replace("{body}", tx)
         fam = re.escape(pat).replace(r"\{body\}", r"[a-z0-9_]+")
         covered |= {k for k in meshes if re.fullmatch(fam, k)}
-        if t in meshes:
-            skipped.append((t, "the mod already has a %s version" % body_name(tgt)))
+        if t in meshes and not (replace_own and s in meshes):
+            skipped.append(
+                (
+                    t,
+                    "the mod already has a %s version%s"
+                    % (
+                        body_name(tgt),
+                        ""
+                        if replace_own
+                        else " (tick 'Replace the outfit's own version' to refit it anyway)",
+                    ),
+                )
+            )
         elif s in meshes:
             jobs.append((s, t))
         else:
@@ -1081,7 +1286,7 @@ def refit_mod(
             "_" + sx
         ):  # family whose {body} path is only stored hashed: add the sibling
             t = k[: -len(sx) - 5] + tx + ".mesh"
-            if t not in meshes:
+            if t not in meshes or replace_own:
                 jobs.append((k, t))
             continue
         if BODY_SUFFIX.search(stem):
@@ -1096,6 +1301,12 @@ def refit_mod(
         "Refitting %d mesh(es) from %s to %s ..."
         % (len(jobs), body_name(src_body), body_name(tgt))
     )
+    replaced = [t for s, t in jobs if s != t and t in meshes]
+    if replaced:
+        log(
+            "  replacing the outfit's own %s version of: %s"
+            % (body_name(tgt), ", ".join(os.path.basename(t) for t in replaced))
+        )
     slots = {}
     if len(jobs) > 1:
         slots = garment_slots(src, js, tweak_items(origin or arcs), sx, wk, game)
@@ -1150,7 +1361,14 @@ def refit_mod(
             open(os.path.join(pack, t), "wb").write(data)
             log(
                 "  %s: %d vertices moved, %d pushed out of the skin%s (read with the tool's own reader, old file "
-                "format)" % (os.path.basename(t), len(pts), pushed, lift(lifted))
+                "format%s)"
+                % (
+                    os.path.basename(t),
+                    len(pts),
+                    pushed,
+                    lift(lifted),
+                    "; its movement can't be copied" if copy_moves else "",
+                )
             )
             done.append((s, t))
             if s in slots:
@@ -1163,12 +1381,18 @@ def refit_mod(
         os.makedirs(os.path.dirname(g2), exist_ok=True)
         shutil.copy(g, g2)
         glbs[t] = (g2, tglb)
-        nv, pushed, lifted, parts = refit_glb(
-            g, tglb, cages[src_body], cages[tgt], inner
+        nv, pushed, lifted, parts, copied = refit_glb(
+            g, tglb, cages[src_body], cages[tgt], inner, copy_moves
         )
         log(
-            "  %s: %d vertices moved, %d pushed out of the skin%s"
-            % (os.path.basename(t), nv, pushed, lift(lifted))
+            "  %s: %d vertices moved, %d pushed out of the skin%s%s"
+            % (
+                os.path.basename(t),
+                nv,
+                pushed,
+                lift(lifted),
+                ", %d now move with the body" % copied if copied else "",
+            )
         )
         shutil.copy(meshes[s], os.path.join(pack, t))
         done.append((s, t))
@@ -1193,7 +1417,9 @@ def refit_mod(
                 done.remove((s, t))
                 skipped.append((s, "WolvenKit can't write this mesh back"))
         progress(0.85)
-        repair_buffers(done, meshes, pack, glbs, work, wk, game, log, skipped)
+        repair_buffers(
+            done, meshes, pack, glbs, work, wk, game, log, skipped, copy_moves
+        )
     for s, why in skipped:
         log("  skipped %s: %s" % (os.path.basename(s), why))
     if not done:
@@ -1201,7 +1427,9 @@ def refit_mod(
             raise ToolError("none of the meshes could be refit (see the list above).")
         log("Nothing needed a refit.")
         return None
-    static = any(s == t for s, t in done)
+    static = any(
+        s == t or t in meshes for s, t in done
+    )  # an existing path is replaced: load first
     tmp = os.path.join(work, "packout")
     os.makedirs(tmp, exist_ok=True)
     run([wk, "pack", pack, "-o", tmp], game, ok="Finished packing")

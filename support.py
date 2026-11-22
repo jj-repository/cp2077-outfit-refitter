@@ -1,4 +1,4 @@
-r"""Support report: the window records what happens (in memory, always on), and 'Support report...' writes one plain
+r"""Support report: the window records what happens (in memory, always on), and 'Report Issues' writes one plain
 text file with that record, the settings and a check of the game folder. No file contents, and the Windows user
 name / profile path is replaced everywhere. Nothing here may crash the window: every check that fails writes its
 reason into the report instead."""
@@ -267,6 +267,15 @@ def check_game(game, out_dir, outfits, refits, lines):
         "Body mods found in archive\\pc\\mod: %s"
         % ("; ".join(bodies) if bodies else "none")
     )
+    try:
+        core.rdar.init_oodle(game)  # archive name lists are Oodle-compressed
+    except Exception:
+        pass
+    rigs = core.rig_mods(game)
+    lines.append(
+        "Rig / breast physics mods (change how V's body moves): %s"
+        % ("; ".join(rigs) if rigs else "none")
+    )
     dup = {n: r for n, r in found.items() if n.endswith(".archive") and len(r) > 1}
     lines.append(
         "Same .archive name in more than one folder: %s"
@@ -382,6 +391,14 @@ def build(session, settings, game, out, outfits, refits):
             "Install into the game: %s"
             % ("ticked" if settings.get("install") else "not ticked")
         )
+        L.append(
+            "Replace the outfit's own version: %s"
+            % ("ticked" if settings.get("replace_own") else "not ticked")
+        )
+        L.append(
+            "Make clothes move with the body: %s"
+            % ("ticked" if settings.get("copy_moves") else "not ticked")
+        )
         L.append("Output folder: %s" % out)
         L.append("Game folder: %s" % game)
         wk = core.wk_exe()
@@ -397,6 +414,19 @@ def build(session, settings, game, out, outfits, refits):
             L.append(
                 "WolvenKit to copy on the next refit: %s" % settings["wk_existing"]
             )
+        L.append(
+            ".NET runtimes (WolvenKit needs 10, 64-bit): %s"
+            % (
+                ", ".join(
+                    "%s%s in %s" % (v, "" if x64 else " (32-bit)", r)
+                    for v, r, x64 in core.net_runtimes()
+                )
+                or "none found"
+            )
+        )
+        for k in ("DOTNET_ROOT", "DOTNET_ROOT_X64"):
+            if os.environ.get(k):
+                L.append("%s setting: %s" % (k, os.environ[k]))
 
     def this():
         L.append("Started: %s" % session.started)

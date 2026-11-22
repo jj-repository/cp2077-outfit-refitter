@@ -15,7 +15,9 @@ vanilla → Angel / EVE, Angel / EVE → vanilla, and Angel ↔ EVE.
   Click **More info**, then **Run anyway**.
 - If the tool says the **.NET 10 Runtime** is missing, install Microsoft's free
   [.NET 10 Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) and start the tool again.
-  WolvenKit needs it.
+  WolvenKit needs it (the 64-bit / x64 one; the WolvenKit app itself brings its own .NET, so it starting fine
+  doesn't mean .NET 10 is installed). Since 1.7 the tool also finds an installed .NET 10 that WolvenKit misses
+  because of a leftover `DOTNET_ROOT` setting, and otherwise lists which .NET versions it found.
 - Tell the tool which body the outfit is made for (**Outfit made for**, usually *Vanilla*). It fills this in from the
   outfit's name when the name says Angel, EVE or Vanilla.
 
@@ -87,6 +89,12 @@ need a hand-made refit. Always look at the result in game.
    It also checks whether the original outfit is in your game. If it is not, the tool installs it too,
    from the same download. An original that is already installed is left as it is.
    The tick is off at first, so nothing goes into your game unless you ask for it.
+   - **Replace the outfit's own version for my body** (off at first): some outfits already come with a version for
+     your body (for example a built-in Angel version). The tool leaves those parts alone, unless you tick this box;
+     then it refits them too and its refit replaces the built-in version. Uninstall the refit to get it back.
+   - **Make clothes move with the body** (off at first): tight clothes then follow the body exactly when V moves,
+     also with rig or breast physics mods. Loose parts like a hanging skirt, and rigid parts like a knife or a bag,
+     keep their own movement.
 6. Click **Refit**.
    - The **first time** it downloads WolvenKit (about 45 MB) and reads the body shapes from your game.
      This takes a minute or two and only happens once.
@@ -109,10 +117,10 @@ The tool only removes files it installed itself.
 
 ## Having a problem?
 
-Click **Support report...** and send the file it makes to the mod author.
+Click **Report Issues** and send the file it makes to the mod author.
 It is a plain text file, saved in your output folder; the tool opens that folder for you.
 It lists what you did in the tool, the log, any errors, your settings, and what the tool finds in your game folder
-(game, ArchiveXL, TweakXL, Codeware, RED4ext, body mods, the outfits' files, the refits).
+(game, ArchiveXL, TweakXL, Codeware, RED4ext, body mods, rig / breast physics mods, the outfits' files, the refits).
 It contains no file contents, and your Windows user name is replaced. You can open it first to see what's inside.
 
 ## Good to know
@@ -131,7 +139,7 @@ It contains no file contents, and your Windows user name is replaced. You can op
   already there; the log says so instead. Without Install, the tool only tells you when the original is missing.
 - **Some parts are skipped on purpose**, and the log says why: glasses, hats and other things that don't
   touch the body, male meshes, versions for other bodies (EBB, RB, ...), and parts the mod already ships
-  a version for your body of (for example a normal-body version when you refit to vanilla).
+  a version for your body of (unless **Replace the outfit's own version** is ticked).
 - **Old outfits work too** (since 1.3): many outfits from before game 2.0 were packed without file names.
   The tool finds the names again from the outfit's other files and refits them like any other outfit. If it
   gives you a version made for another body (EBB, RB, ...), the log warns you; get the vanilla one if there is one.
@@ -152,8 +160,9 @@ It contains no file contents, and your Windows user name is replaced. You can op
   without its tweak file, so the tool can find them. Outfits without that information are refit as before.
 - **Chest size**: Hyst tells you to set V's chest size (*Breast*) to *Big* for Angel. That setting changes how V looks
   nude; in clothes her chest is the same with every setting, so refits fit all of them.
-- **Rig mods that change the breast area** (for example "All the Rigs"): Hyst says they make some clothes clip with
-  these bodies. The tool can't fix that.
+- **Rig mods that change the breast area** (for example "All the Rigs") and breast physics mods: Hyst says they make
+  some clothes clip with these bodies, mostly when V moves. The tool finds such mods in your game and says so in the
+  log; tick **Make clothes move with the body** so tight clothes follow those movements.
 
 ## Please respect the authors
 
@@ -195,7 +204,11 @@ the WolvenKit team or Nexus Mods.
 4. Each vertex is moved by the difference between the source body and the target body: every source body vertex
    gets the offset to the nearest vertex of the target body, smoothed over its neighbours, and each
    clothing vertex moves by the inverse-distance-weighted offset of its 8 nearest source body vertices.
-   Vertices that end up inside the target body are pushed out to 4 mm above the skin.
+   Vertices that end up inside the target body are pushed out to 4 mm above the skin: first along the nearest
+   body vertex's normal, then (1.7) vertices within 1 cm of the skin are checked against the exact surface
+   (closest point on the body's triangles) and lifted to 4 mm where they are lower than 2 mm. The vertex normal
+   alone left up to 2.6 mm inside on EVE's crotch and on tights' soles; hidden parts deeper than 1.5 cm inside
+   the body (an outfit's own) are left alone.
    Only positions change: UVs, skin weights, normals and morph targets stay the same.
    Every pair is one direct step (Angel → EVE does not go over vanilla, which would add the error and the
    push-out twice).
@@ -226,6 +239,21 @@ the WolvenKit team or Nexus Mods.
      Angel's other chest meshes (`femv_boobs_squish` / `femv_boobs_natural`) replace the chest only under garments
      that carry the visual tags `hyst_boobs_*` (`ANGEL.xl`), which vanilla clothing doesn't. EVE: no GarmentSupport
      shape key, `breast_big` at most 6.8 mm (median 1.1 mm).
+   - **Clothes move with the body** (1.7, option): V's skin moves by its bone weights; rig and breast physics mods
+     move the chest bones (`l/r_chest_front_*_JNT`, driven by `woman_base_breasts.rig`). Clothing that isn't
+     weighted to them stays behind and the skin pokes through. With the option, every clothing vertex within 4 cm
+     of the target body gets the body's weights at the closest point of its skin (triangle-exact, barycentric over
+     the 3 corners' 8 influences): fully within 1.5 cm, blended with its own weights out to 4 cm; the 8 strongest
+     influences are kept and normalized. A body bone the garment's skin lacks falls back to its nearest parent the
+     garment has. Rigid parts (every vertex led by one of at most 2 bones: knives, buckles, bags) keep theirs.
+     Written through WolvenKit's glb import (checked: it writes changed JOINTS / WEIGHTS, bone list unchanged);
+     meshes written without it (own reader, rebuilt big buffers) keep their weights and the log says so. Offline
+     check (chest bones moved 2 cm, linear blend skinning): Maniekk Pt5 1,324 clothing vertices inside the moved body
+     without the option, 0 with it; Peachu Mini Bra 66 -> 0.
+   - **Rig / breast physics mods** (1.7): mods in `archive\pc\mod` (subfolders too) that replace one of V's body rigs
+     (`woman_base.rig`, `woman_base_deformations.rig`, `woman_base_breasts.rig`, by hash) or hold breast / body physics
+     files (by name inside the archive; an archive without a name list is judged by its file name). Listed in the log
+     (Angel / EVE targets) and in the report.
 5. WolvenKit imports the moved positions back into a copy of the original mesh.
 6. WolvenKit 9.1.1 can write very big mesh buffers (over ~1.4 MB) in a way the game can't read.
    Those meshes are rebuilt directly (positions written into the original render buffer, compressed
@@ -246,8 +274,10 @@ Output (`<Body>` = the target: `Angel`, `Eve`, `Vanilla`):
 - Dynamic meshes (`*_{body}.mesh`): the source body's member (`_base_body` for vanilla, `_angel`, `_eve`) is refit
   and written as a **new** file for the target body, which ArchiveXL picks automatically when that body is
   installed: `<path>_angel.mesh` / `<path>_eve.mesh`, or `<path>_base_body.mesh` for vanilla (ArchiveXL's name for
-  "no body mod"). Archive: `<Body>Refit_<outfit>.archive`. A member the mod already has is never replaced; most
-  `{body}` outfits already ship `_base_body`, so refitting those to vanilla has nothing to do (the log says so).
+  "no body mod"). Archive: `<Body>Refit_<outfit>.archive`. A member the mod already has is left alone (most
+  `{body}` outfits already ship `_base_body`, so refitting those to vanilla has nothing to do; the log says so),
+  unless **Replace the outfit's own version** is ticked: then it is refit from the source member as well and the
+  archive is named `!!!<Body>Refit_<outfit>.archive`, so it loads before the outfit.
 - Static meshes (no `{body}` support in the mod) are replaced in place: `!!!<Body>Refit_<outfit>.archive`. For
   vanilla this is how an Angel-only or EVE-only outfit fits the normal body.
   No `.xl` file is needed for either.
@@ -293,7 +323,8 @@ python outfit_refitter.py --refit "Some Outfit-ANGEL.archive" --from angel --bod
 ```
 
 `--body`: the body to refit to; `--from`: the body the outfit is made for (`vanilla`, `angel`, `eve`; default
-`vanilla`); `--body-file TAG=FILE`: a body's `.archive` or download when it is not installed in the game.
+`vanilla`); `--body-file TAG=FILE`: a body's `.archive` or download when it is not installed in the game;
+`--replace-own`: also refit and replace the outfit's own version for that body; `--copy-moves`: clothes move with the body.
 
 ### Building the Windows version
 
@@ -313,11 +344,17 @@ python outfit_refitter.py --selftest --home <empty folder> --out <folder>
        [--case angel=<outfit>=<a refit you trust.archive>[=exact]] [--case angel>vanilla=<Angel outfit>[=<reference>]] ...
        [--compare <a.archive>=<b.archive>] [--roundtrip angel=<vanilla outfit>[=<max mean mm>]]
        [--layers angel=<vanilla outfit>=<inner stem>,<stem>,<outer stem>] [--chest angel=<vanilla outfit>]
+       [--replace-own angel=<outfit with its own Angel version>] [--motion angel=<vanilla outfit>]
+       [--gui-source-own <outfit with its own Angel version>]
 ```
 
 `--layers` refits a layered outfit and counts outer-layer vertices below an inner layer, in the 1.5 result
 (recomputed) and in the output (must be 0); `--chest` refits an outfit and counts garment vertices inside the
-body as the game shows it in clothes (must be 0).
+body as the game shows it in clothes (must be 0); `--replace-own` checks that an outfit's own version is left alone
+without the option and refit into a `!!!` archive with it; `--motion` moves the body's chest bones 2 cm and counts
+clothing vertices inside the moved body without and with **Make clothes move with the body** (must be 0 with it);
+`--gui-source-own` ticks **Replace the outfit's own version** in the real window. It also checks the rig / breast
+physics mod detection and the rigid-part rule.
 
 It checks the download-variant selection and the source-body logic (name guess, wrong-body warning, picking a
 download's version, body file checks), detects the game, downloads and checks WolvenKit into `--home`
@@ -330,7 +367,7 @@ same body twice, missing source body, body from a download, **Body file...**, cl
 the window for two seconds. `--gui-install <folder> --gui-install-outfit <outfit>=><expected file>;...` runs the
 Install tests in the real window on a fake game folder it makes in `<folder>` (original missing, original already
 there, Install unticked, Uninstall, closing the window mid-refit); the real game folder is only read.
-`--support <folder> --support-outfit <outfit>` (three times) tests **Support report...** in the real window on two
+`--support <folder> --support-outfit <outfit>` (three times) tests **Report Issues** in the real window on two
 fake game folders (with and without ArchiveXL etc.), including a restart. `--own-reader <outfit>` checks the
 own mesh reader on every mesh of an outfit: same positions as WolvenKit's export, byte-exact round trip, and a
 displaced write that WolvenKit reads back as written. Exit code 0 = passed. In the windowed `.exe`, the text goes to
@@ -347,6 +384,6 @@ topology. **Only add bodies whose authors allow their bodies to be used this way
 
 ### Data folder
 
-`%LOCALAPPDATA%\OutfitRefitter\`: `settings.json` (game folder, body, picked body files, output folder, install tick; "Outfit made for" is not saved, it starts on Vanilla), `installed.json` (the uninstall list: refits and original outfits the tool installed), `wolvenkit\`,
+`%LOCALAPPDATA%\OutfitRefitter\`: `settings.json` (game folder, body, picked body files, output folder, install tick, the replace-own-version and move-with-the-body ticks; "Outfit made for" is not saved, it starts on Vanilla), `installed.json` (the uninstall list: refits and original outfits the tool installed), `wolvenkit\`,
 `cages\`, `work\` (temporary), `last_session.txt` and `previous_session.txt` (what happened in the window in this
 and the last run, for the support report). Delete the folder to reset the tool.

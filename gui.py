@@ -102,6 +102,8 @@ Steps, in order
 5. Add the outfit: drag its download (zip / 7z / rar), its unpacked folder or its .archive file into the big list. Or use 'Add outfit...' / 'Add folder...'. You can add several outfits at once, but 'Outfit made for' counts for all of them, so add outfits for one body at a time. If a download has versions for several bodies, the tool uses the one for 'Outfit made for' (or the vanilla one).
 
 6. Install: tick 'Install into the game when done' if the tool should put the refit straight into your game. If the original outfit is not in your game yet, the tool installs it too, from the same download. Leave it unticked to only save the file in the output folder; then nothing goes into your game.
+   Some outfits already come with their own version for your body (for example a built-in Angel version). The tool leaves those parts alone. If you'd rather have the tool's refit for them too (for example because the built-in version clips), tick 'Replace the outfit's own version for my body'. Uninstall the refit to get the outfit's own version back.
+   'Make clothes move with the body': tight clothes then follow the body exactly when V moves, also with rig or breast physics mods (the log tells you if you have such mods). Loose parts like a hanging skirt keep their own movement. Leave it off if you don't use such mods and the clothes look right.
 
 7. Click 'Refit'. The bar and the log below show the progress. The first run takes longer: the tool downloads WolvenKit (about 45 MB) and reads the body shapes once.
 
@@ -117,11 +119,11 @@ Good to know
 - If something is skipped (for example glasses or props), the log says so; the rest of the outfit is still refit.
 - Outfits with several layers (for example a top, a shirt and a jacket): the tool keeps each layer 1 mm above the one under it, so the shirt doesn't poke through the jacket. It knows the order from the outfit's own files (when the outfit uses ArchiveXL outfit slots such as TorsoUnder / TorsoMiddle / TorsoOuter). Add the outfit's download, not only its .archive, so the tool can read them.
 - Chest size: Hyst tells you to set V's chest size ('Breast') to 'Big' for Angel. That setting changes how V looks nude; in clothes her chest is the same with every setting, so refits fit all of them.
-- Hyst says that rig mods which change the breast area (for example "All the Rigs") make some clothes clip with Angel and EVE. This tool can't fix that.
+- Hyst says that rig mods which change the breast area (for example "All the Rigs") and breast physics mods make some clothes clip with Angel and EVE, mostly when V moves. The tool tells you in the log if you have such mods; tick 'Make clothes move with the body' so tight clothes follow those movements.
 - 'WolvenKit...' lets you use a WolvenKit you already have instead of downloading it.
 
 Having a problem?
-Click 'Support report...' and send the file it makes to the mod author. It lists what you did in the tool, the log, and what the tool finds in your game folder. Your Windows user name is left out, and no file contents are included. You can open the file first to see what's inside.
+Click 'Report Issues' and send the file it makes to the mod author. It lists what you did in the tool, the log, and what the tool finds in your game folder. Your Windows user name is left out, and no file contents are included. You can open the file first to see what's inside.
 """
 
 
@@ -147,7 +149,7 @@ class App:
         self.s = core.load_settings()
         self.tags = list(core.bodies()["bodies"])
         root.title("Outfit Refitter %s" % core.VERSION)
-        root.minsize(560, 520)
+        root.minsize(560, 600)
         pad = dict(padx=8, pady=3)
 
         f = ttk.Frame(root)
@@ -210,6 +212,24 @@ class App:
         ttk.Checkbutton(
             o, text="Install into the game when done", variable=self.inst
         ).pack(side="left")
+        o2 = ttk.Frame(root)
+        o2.pack(fill="x", **pad)
+        # off by default: parts the outfit already has a version for your body of are left alone
+        self.own = tk.BooleanVar(value=self.s.get("replace_own", False))
+        ttk.Checkbutton(
+            o2,
+            text="Replace the outfit's own version for my body (if it has one)",
+            variable=self.own,
+        ).pack(side="left")
+        o3 = ttk.Frame(root)
+        o3.pack(fill="x", **pad)
+        # off by default: clothes keep their own movement (skin weights)
+        self.moves = tk.BooleanVar(value=self.s.get("copy_moves", False))
+        ttk.Checkbutton(
+            o3,
+            text="Make clothes move with the body (helps with rig / breast physics mods)",
+            variable=self.moves,
+        ).pack(side="left")
 
         a = ttk.Frame(root)
         a.pack(fill="x", **pad)
@@ -218,7 +238,7 @@ class App:
         self.button(a, "Open output folder", self.open_out).pack(side="left", padx=4)
         self.button(a, "Uninstall...", self.uninstall).pack(side="left")
         self.button(a, "Help", self.show_help).pack(side="right")
-        self.button(a, "Support report...", self.support_report).pack(
+        self.button(a, "Report Issues", self.support_report).pack(
             side="right", padx=(4, 0)
         )
         self.button(a, "WolvenKit...", self.pick_wk).pack(side="right", padx=4)
@@ -254,18 +274,22 @@ class App:
                 ("output folder", self.out),
             )
         ]
-        traces.append(
-            (
-                self.inst,
-                self.inst.trace_add(
-                    "write",
-                    lambda *x: self.rec(
-                        "action",
-                        "install box " + ("ticked" if self.inst.get() else "unticked"),
+        for var, what in (
+            (self.inst, "install box "),
+            (self.own, "replace own version box "),
+            (self.moves, "move with the body box "),
+        ):
+            traces.append(
+                (
+                    var,
+                    var.trace_add(
+                        "write",
+                        lambda *x, v=var, w=what: self.rec(
+                            "action", w + ("ticked" if v.get() else "unticked")
+                        ),
                     ),
-                ),
+                )
             )
-        )
         root.bind(
             "<Destroy>",
             lambda e: (
@@ -288,7 +312,7 @@ class App:
                 "Ready. Add outfits, check 'Outfit made for' and your body, then press Refit."
             )
         root.update_idletasks()  # never shrink the window so far that buttons get cut off
-        root.minsize(max(560, a.winfo_reqwidth() + 16), 520)
+        root.minsize(max(560, a.winfo_reqwidth() + 16), 600)
         root.after(100, self.poll)
 
     # ---- helpers ----
@@ -326,7 +350,13 @@ class App:
         self.log_box["state"] = "disabled"
 
     def save(self):
-        self.s.update(game=self.game.get(), body=self.tag(), install=self.inst.get())
+        self.s.update(
+            game=self.game.get(),
+            body=self.tag(),
+            install=self.inst.get(),
+            replace_own=self.own.get(),
+            copy_moves=self.moves.get(),
+        )
         core.save_settings(self.s)
 
     def body_files(self):
@@ -522,6 +552,8 @@ class App:
                 self.s,
                 body=self.tag(),
                 install=self.inst.get(),
+                replace_own=self.own.get(),
+                copy_moves=self.moves.get(),
                 **{"from": self.src_tag()},
             )
             text = support.build(
@@ -655,12 +687,15 @@ class App:
         self.save()
         self.rec(
             "action",
-            "Refit started: %d outfit(s), made for %s, body %s, install %s, game %s, output %s"
+            "Refit started: %d outfit(s), made for %s, body %s, install %s, replace own version %s, move with the body %s, game %s, "
+            "output %s"
             % (
                 len(files),
                 self.src.get(),
                 self.body.get(),
                 "ticked" if self.inst.get() else "unticked",
+                "ticked" if self.own.get() else "unticked",
+                "ticked" if self.moves.get() else "unticked",
                 self.game.get(),
                 self.out_dir(),
             ),
@@ -679,6 +714,8 @@ class App:
             self.s.pop("wk_existing", None),
             self.cancel,
             self.src_tag(),
+            self.own.get(),
+            self.moves.get(),
         )
         # the worker gets only the queue and plain values, never the window objects (Tk is not thread-safe)
         self.worker = threading.Thread(
@@ -687,7 +724,9 @@ class App:
         self.worker.start()
 
     @staticmethod
-    def work(q, files, tag, game, out, inst, body_files, wk_existing, cancel, src):
+    def work(
+        q, files, tag, game, out, inst, body_files, wk_existing, cancel, src, own, moves
+    ):
         put = lambda m: q.put(("log", m))
         try:
             res = core.run_batch(
@@ -702,6 +741,8 @@ class App:
                 wk_existing,
                 cancel,
                 src,
+                own,
+                moves,
             )
             ok = [r for r in res if r[1]]
             put("")
@@ -794,9 +835,11 @@ def drive(
     close_on=None,
     src="vanilla",
     body_files=None,
+    replace_own=False,
+    copy_moves=False,
 ):
     """Self-test: open the real window, drop an outfit on it, pick the body (and game folder, body file, Install
-    tick), press Refit, wait for the result. close_on: text; when it shows up in the log, the window gets a real
+    tick, 'Replace the outfit's own version' tick), press Refit, wait for the result. close_on: text; when it shows up in the log, the window gets a real
     WM_CLOSE (the user clicking X) in the middle of the refit.
     -> {"ok": finished without error, "log": [window log lines], "worker": the refit thread}"""
     import ctypes, gc, time
@@ -819,6 +862,8 @@ def drive(
         app.s.setdefault("body_archive", {})[tag] = body_file
     app.out.set(out)
     app.inst.set(install)
+    app.own.set(replace_own)
+    app.moves.set(copy_moves)
     app.body.set(core.body_name(tag))
     app.show_body()
     t0 = time.time()

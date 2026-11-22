@@ -12,6 +12,9 @@ with refits you trust (e.g. ones made by hand).
 --layers TAG=OUTFIT=STEM,STEM,...: garment layers (mesh stems inner -> outer): outer-layer vertices below an inner
     layer in 1.5 (recomputed) and in the output (must be 0).
 --chest TAG=OUTFIT: garment vertices inside the body as the game shows it in clothes (must be 0).
+--replace-own TAG=OUTFIT: an outfit with its own TAG version: left alone without the option, refit into a '!!!'
+    archive with it.
+--motion TAG=OUTFIT: 'Make clothes move with the body': the chest bones move 2 cm, nothing may end up inside.
 --gui-source DIR --gui-source-outfit ANGEL_OUTFIT [--gui-source-body eve=DOWNLOAD]: 'Outfit made for' tests in the
     real window (pre-fill, wrong source, same body twice, missing source body, body from a download, 'Body file...',
     closing mid-refit).
@@ -26,7 +29,7 @@ with refits you trust (e.g. ones made by hand).
     the refit stopped by closing the window (the process exits while it ends).
 --own-reader OUTFIT: check the own mesh reader (used for meshes WolvenKit can't read) on every mesh of OUTFIT:
     same positions as WolvenKit's export, byte-exact round trip, displaced write read back by WolvenKit.
---support DIR --support-outfit OUTFIT (3x: two zips with r6\tweaks, then one more): 'Support report...' tests in the
+--support DIR --support-outfit OUTFIT (3x: two zips with r6\tweaks, then one more): 'Report Issues' tests in the
     real window on two fake games made in DIR (with / without ArchiveXL etc.), incl. a restart (previous session).
 Exit code 0 = everything passed."""
 
@@ -263,6 +266,83 @@ def check_source(core):
         )
     finally:
         shutil.rmtree(t, ignore_errors=True)
+
+
+def check_dotnet(core):
+    """WolvenKit and .NET: a leftover DOTNET_ROOT pointing to an empty folder is worked around (the installed .NET 10
+    is found and used); with no .NET 10 anywhere the message says what was found. Needs .NET 10 installed."""
+    t = tempfile.mkdtemp(prefix="outfitrefit_net_")
+    keys = (
+        "DOTNET_ROOT",
+        "DOTNET_ROOT_X64",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "LOCALAPPDATA",
+        "USERPROFILE",
+    )
+    old = {k: os.environ.get(k) for k in keys}
+    seen = []
+    core.ensure_wolvenkit(seen.append)  # a fresh data folder: download it first
+    try:
+        os.environ["DOTNET_ROOT"] = t
+        os.environ.pop("DOTNET_ROOT_X64", None)
+        core._ENV.clear()
+        core._wk_ready(core.wk_exe(), seen.append)
+        assert any("uses the .NET 10 in" in m for m in seen), seen
+        for k in keys[2:]:
+            os.environ[k] = t
+        core._ENV.clear()
+        try:
+            core._wk_ready(core.wk_exe(), seen.append)
+            raise AssertionError("no error without .NET 10")
+        except core.ToolError as e:
+            assert ".NET found on this PC: none" in str(
+                e
+            ) and "DOTNET_ROOT setting" in str(e), e
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        core._ENV.clear()
+        shutil.rmtree(t, ignore_errors=True)
+
+
+def check_rigs(core):
+    """Rig / breast physics mods are found; other mods are not (stub archives: judged by their name)."""
+    t = tempfile.mkdtemp(prefix="outfitrefit_rigs_")
+    try:
+        md = os.path.join(t, "archive", "pc", "mod", "Sub Ordner ä")
+        os.makedirs(md)
+        for f in (
+            "All The Rigs - Breasts.archive",
+            "Some Outfit.archive",
+            "body_physics_v.archive",
+            "readme.txt",
+        ):
+            open(os.path.join(md, f), "wb").write(b"stub")
+        got = [os.path.basename(x) for x in core.rig_mods(t)]
+        assert got == ["All The Rigs - Breasts.archive", "body_physics_v.archive"], got
+        assert core.rig_mods(os.path.join(t, "none")) == []
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+
+def check_rigid(refit):
+    """copy_weights leaves rigid parts alone: a part led by at most 2 bones is rigid, cloth led by many is not."""
+    import numpy as np
+
+    one = (np.zeros((50, 8), np.int64), np.tile([1.0, 0, 0, 0, 0, 0, 0, 0], (50, 1)))
+    two = (
+        np.tile([3, 4, 0, 0, 0, 0, 0, 0], (50, 1)),
+        np.tile([0.6, 0.4, 0, 0, 0, 0, 0, 0], (50, 1)),
+    )
+    cloth = (
+        np.arange(50)[:, None] % 12 + np.zeros((50, 8), np.int64),
+        np.tile([1.0, 0, 0, 0, 0, 0, 0, 0], (50, 1)),
+    )
+    assert refit.rigid(*one) and refit.rigid(*two) and not refit.rigid(*cloth)
 
 
 def check_recover_names(rdar, refit):
@@ -853,6 +933,29 @@ def gui_source_tests(core, gui, a, log, fails):
         shutil.rmtree(
             core.cage_dir("eve"), ignore_errors=True
         )  # later runs re-read it from their own file
+    # 5c. 'Replace the outfit's own version' ticked in the window (an outfit with its own Angel version)
+    if opt(a, "--gui-source-own"):
+        ow = os.path.join(inp, os.path.basename(opt(a, "--gui-source-own")))
+        shutil.copy2(opt(a, "--gui-source-own"), ow)
+        b = set(os.listdir(out))
+        st = gui.drive(
+            ow,
+            "angel",
+            out,
+            log,
+            game=game,
+            src="vanilla",
+            body_files=barch,
+            replace_own=True,
+        )
+        new = made("!!!AngelRefit_", b)
+        check(
+            "replace own version ticked: the outfit's own Angel parts refit into a '!!!' archive",
+            st["ok"]
+            and len(new) == 1
+            and has(st, "replacing the outfit's own Hyst Angel version"),
+            (st["errors"], new),
+        )
     # 6. 'Body file...' (the part after the file dialog), help text
     boxes = []
     messagebox.showerror = lambda t, m, **k: boxes.append(m)
@@ -1023,7 +1126,7 @@ def remove_junction(j):
 
 def support_tests(core, gui, a, log, fails):
     r"""--support DIR --support-outfit OUTFIT (3x): drop outfits on the real window, change body, tick Install, Refit
-    into a fake game in DIR, cause an error, click 'Support report...' and check the report; then restart the
+    into a fake game in DIR, cause an error, click 'Report Issues' and check the report; then restart the
     window on a second fake game without ArchiveXL etc. and check again (previous session, missing flags)."""
     import support
     from tkinter import messagebox
@@ -1062,7 +1165,7 @@ def support_tests(core, gui, a, log, fails):
 
     def click_report(app, root):
         n = len(boxes)
-        find_button(root, "Support report...").invoke()
+        find_button(root, "Report Issues").invoke()
         yield lambda: len(boxes) > n
         p = opened[-1] if opened else None
         check(
@@ -1174,7 +1277,7 @@ def support_tests(core, gui, a, log, fails):
             "Refit started: 3 outfit(s)",
             "Refit finished",
             "removed outfit: " + s(bogus),
-            "clicked 'Support report...'",
+            "clicked 'Report Issues'",
             "Testzeile mit dem Namen: <user> <user> <user>",
         ]:
             check("report A has: " + want, want in A)
@@ -1420,6 +1523,181 @@ def chest_test(core, wk, game, spec, run_case, barch, log, fails):
         shutil.rmtree(work, ignore_errors=True)
 
 
+def own_test(core, rdar, wk, game, spec, barch, log, fails):
+    """--replace-own TAG=OUTFIT (an outfit that ships its own TAG version of {body} parts): without the option those
+    parts are left alone and the log says how to refit them anyway; with it they are refit into a '!!!' archive
+    (loads before the outfit) that passes the safety check. Prints how far the refit is from the author's version."""
+    import refit
+
+    tag, inp = spec.split("=")
+    xl = core.xl_name(tag)
+    log("\n### replace the outfit's own %s version: %s" % (tag, os.path.basename(inp)))
+    names = set(rdar.Rdar(inp).names)
+    own = sorted(
+        n
+        for n in names
+        if n.endswith("_%s.mesh" % xl) and n[: -len(xl) - 5] + "base_body.mesh" in names
+    )
+    log("  the outfit's own %s parts: %d" % (tag, len(own)))
+    work = tempfile.mkdtemp(prefix="own_", dir=core._work_root())
+
+    def check(name, cond, detail=""):
+        log(
+            "  %s %s%s"
+            % (
+                "OK  " if cond else "FAIL",
+                name,
+                (" -- %s" % (detail,)) if detail and not cond else "",
+            )
+        )
+        if not cond:
+            fails.append("replace own: " + name)
+
+    try:
+        for on in (False, True):
+            lines = []
+            res = core.run_batch(
+                [inp],
+                tag,
+                game,
+                os.path.join(work, str(on)),
+                lines.append,
+                body_files=barch,
+                replace_own=on,
+            )
+            arch = res[0][1]
+            got = set(rdar.Rdar(arch).names) if arch else set()
+            if not on:
+                check(
+                    "option off: own parts left alone, log says how to refit them",
+                    own
+                    and not (got & set(own))
+                    and any(
+                        "tick 'Replace the outfit's own version'" in l for l in lines
+                    ),
+                    sorted(got & set(own)),
+                )
+                continue
+            check(
+                "option on: own parts refit into a '!!!' archive, safety check OK",
+                arch
+                and os.path.basename(arch).startswith("!!!")
+                and set(own) <= got
+                and not refit.buffer_gate(arch, {})
+                and any("replacing the outfit's own" in l for l in lines),
+                (arch, sorted(set(own) - got)),
+            )
+            if arch:
+                show_compare(wk, game, arch, inp, log, "the author's own version in")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def motion_test(core, wk, game, spec, barch, log, fails):
+    """--motion TAG=OUTFIT: 'Make clothes move with the body', offline. Refit OUTFIT with the option off and on, move
+    the body's chest bones 2 cm outward (as breast physics / rig mods do) and move body and clothes by their skin
+    weights (linear blend skinning, translations only). With the option on, no clothing vertex may end up inside the
+    moved body (nearest body vertex along its normal, within 6 cm), and rigid parts (one or two bones) keep their
+    weights."""
+    import numpy as np
+    import refit
+    from scipy.spatial import cKDTree
+
+    tag, inp = spec.split("=")
+    log(
+        "\n### clothes move with the body, vanilla -> %s: %s"
+        % (tag, os.path.basename(inp))
+    )
+    _, cages = core.setup(game, "vanilla", tag, log, body_files=barch)
+    P, N, _, _ = refit.surface(cages[tag])
+    bnames, BJ, BW, _ = refit.body_skin(cages[tag])
+    Tj = np.zeros((len(bnames), 3))
+    for i, nm in enumerate(bnames):
+        if "chest" in nm.lower():
+            w = (BW * (BJ == i)).sum(1)
+            if (w > 0.3).any():
+                nn = (N[w > 0.3] * w[w > 0.3, None]).sum(0)
+                Tj[i] = 0.02 * nn / np.linalg.norm(nn)
+    log("  chest bones moved 2 cm: %d" % int((np.abs(Tj).sum(1) > 0).sum()))
+    moved = P + (BW[..., None] * Tj[BJ]).sum(1)
+    tree0, tree1 = cKDTree(P), cKDTree(moved)
+
+    def inside(X, tree, B):
+        dist, k = tree.query(X)
+        return int(((((X - B[k]) * N[k]).sum(1) < 0) & (dist < 0.06)).sum())
+
+    work = tempfile.mkdtemp(prefix="motion_", dir=core._work_root())
+    res = {}
+    try:
+        for on in (False, True):
+            lines = []
+            r = core.run_batch(
+                [inp],
+                tag,
+                game,
+                os.path.join(work, str(on)),
+                lines.append,
+                body_files=barch,
+                copy_moves=on,
+            )
+            if not r[0][1]:
+                log("FAIL: no output (%s)" % r[0][2])
+                fails.append("motion " + os.path.basename(inp))
+                return
+            src = os.path.join(work, "s%s" % on)
+            core.run([wk, "unbundle", r[0][1], "-o", src], game)
+            before = after = near = 0
+            for m in glob.glob(os.path.join(src, "**", "*.mesh"), recursive=True):
+                gd = os.path.join(work, "g%s" % on, os.path.basename(m))
+                os.makedirs(gd)
+                try:
+                    core.run([wk, "export", m, "-o", gd, "-gp", game], game)
+                except RuntimeError:
+                    continue
+                d, j, b = refit.load(glob.glob(os.path.join(gd, "*.glb"))[0])
+                gn = (
+                    [j["nodes"][ni].get("name") for ni in j["skins"][0]["joints"]]
+                    if j.get("skins")
+                    else []
+                )
+                gT = np.array(
+                    [Tj[bnames.index(x)] if x in bnames else np.zeros(3) for x in gn]
+                    or [np.zeros(3)]
+                )
+                for mm in j["meshes"]:
+                    if "LOD_1" not in (mm.get("name") or "LOD_1"):
+                        continue
+                    for pr in mm["primitives"]:
+                        sk = refit.prim_skin(d, j, b, pr)
+                        if sk is None:
+                            continue
+                        X = refit.read(d, j, b, pr["attributes"]["POSITION"])
+                        near += int((tree0.query(X)[0] < 0.06).sum())
+                        before += inside(X, tree0, P)
+                        after += inside(
+                            X + (sk[1][..., None] * gT[sk[0]]).sum(1), tree1, moved
+                        )
+            res[on] = after
+            log(
+                "  option %s: %d clothing vertices near the body; inside before %d, after the chest moved %d"
+                % ("ON " if on else "off", near, before, after)
+            )
+            if on:
+                for l in lines:
+                    if "now move with the body" in l or "movement can't" in l:
+                        log("    | " + l.strip())
+        if res[True]:
+            log("FAIL: with the option, clothes still end up inside the moving chest")
+            fails.append("motion " + os.path.basename(inp))
+        else:
+            log(
+                "  clothes move with the body OK (%d inside without the option, 0 with it)"
+                % res[False]
+            )
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def main(a):
     if opt(a, "--home"):
         os.environ["BODYREFIT_HOME"] = os.path.abspath(opt(a, "--home"))
@@ -1440,6 +1718,24 @@ def main(a):
     except AssertionError as e:
         log("FAIL source body: %s" % (e,))
         fails.append("source body")
+    try:
+        check_rigid(__import__("refit"))
+        log("rigid parts keep their movement OK")
+    except AssertionError as e:
+        log("FAIL rigid parts: %s" % (e,))
+        fails.append("rigid")
+    try:
+        check_rigs(core)
+        log("rig / breast physics mod detection OK")
+    except AssertionError as e:
+        log("FAIL rig mod detection: %s" % (e,))
+        fails.append("rigs")
+    try:
+        check_dotnet(core)
+        log("WolvenKit finds .NET 10 despite a wrong DOTNET_ROOT OK")
+    except (AssertionError, core.ToolError) as e:
+        log("FAIL WolvenKit / .NET: %s" % (e,))
+        fails.append("dotnet")
     try:
         check_recover_names(rdar, __import__("refit"))
         log("names for archives without a name list OK")
@@ -1518,7 +1814,13 @@ def main(a):
         log("\n### case %s: %s -> %s" % (os.path.basename(inp), src, tag))
         seen[:] = []
         res = core.run_batch(
-            [inp], tag, game, dest, lambda m: (seen.append(m), log(m)), body_files=barch, src=src
+            [inp],
+            tag,
+            game,
+            dest,
+            lambda m: (seen.append(m), log(m)),
+            body_files=barch,
+            src=src,
         )
         arch = res[0][1]
         if not arch:
@@ -1600,6 +1902,18 @@ def main(a):
         except Exception:
             log("FAIL: clothed chest test crashed:\n" + traceback.format_exc())
             fails.append("chest " + c)
+    for c in opt_all(a, "--replace-own"):
+        try:
+            own_test(core, rdar, wk, game, c, barch, log, fails)
+        except Exception:
+            log("FAIL: replace-own test crashed:\n" + traceback.format_exc())
+            fails.append("replace own " + c)
+    for c in opt_all(a, "--motion"):
+        try:
+            motion_test(core, wk, game, c, barch, log, fails)
+        except Exception:
+            log("FAIL: motion test crashed:\n" + traceback.format_exc())
+            fails.append("motion " + c)
     if "--gui" in a:
         try:
             import gui

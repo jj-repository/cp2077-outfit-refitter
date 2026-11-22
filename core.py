@@ -25,7 +25,7 @@ if (
     except OSError:
         DATA = _OLD_DATA
 
-VERSION = "1.6"
+VERSION = "1.7"
 
 
 def documents_dir():
@@ -208,7 +208,7 @@ _FLAGS = (
 
 def run(args, game=None, ok=None):
     """Run a tool hidden at low priority. ok: text that marks success even on a non-zero exit (WolvenKit import)."""
-    env = dict(os.environ)
+    env = dict(os.environ, **_ENV)
     if game:
         env["CP77_DIR"] = game
     p = subprocess.Popen(
@@ -253,16 +253,81 @@ def wk_exe():
     return os.path.join(DATA, "wolvenkit", "WolvenKit.CLI.exe")
 
 
+_ENV = {}  # extra environment for the tools (a working DOTNET_ROOT, see _wk_ready)
+_NO_NET = (
+    "You must install .NET",
+    "You must install or update .NET",
+    "Microsoft.NETCore.App",
+)
+
+
+def net_runtimes():
+    """[(version, .NET folder, 64-bit)] of the .NET runtimes in the usual places (the installer's, a user install,
+    and any DOTNET_ROOT that is set)."""
+    roots = [
+        os.environ.get(k, "")
+        for k in ("DOTNET_ROOT_X64", "DOTNET_ROOT", "DOTNET_ROOT(x86)")
+    ]
+    roots += [
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "dotnet"),
+        os.path.join(
+            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "dotnet"
+        ),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "dotnet"),
+        os.path.join(os.path.expanduser("~"), ".dotnet"),
+    ]
+    out, seen = [], set()
+    for r in roots:
+        if not r or os.path.normcase(os.path.abspath(r)) in seen:
+            continue
+        seen.add(os.path.normcase(os.path.abspath(r)))
+        for v in sorted(
+            glob.glob(os.path.join(r, "shared", "Microsoft.NETCore.App", "*"))
+        ):
+            out.append((os.path.basename(v), r, "(x86)" not in r))
+    return out
+
+
 def _wk_ready(exe, log):
     try:
         v = run([exe, "--version"]).strip()
     except (RuntimeError, OSError) as e:
-        if "NET" in str(e) or "framework" in str(e).lower():
-            raise ToolError(
-                "WolvenKit needs the free Microsoft .NET 10 Runtime. Install it from %s "
-                "(pick '.NET Runtime 10', x64), then press Refit again." % DOTNET_URL
+        if not any(m in str(e) for m in _NO_NET):
+            raise ToolError("WolvenKit does not start:\n%s" % e)
+        # WolvenKit can't find .NET 10. Often it is installed but a leftover DOTNET_ROOT setting (from developer
+        # tools or game engines) sends WolvenKit to another folder: try every 64-bit .NET 10 found ourselves.
+        rts = net_runtimes()
+        for root in dict.fromkeys(
+            r for ver, r, x64 in rts if x64 and re.match(r"10\.\d+\.\d+$", ver)
+        ):
+            _ENV.update(DOTNET_ROOT=root, DOTNET_ROOT_X64=root)
+            try:
+                v = run([exe, "--version"]).strip()
+                log("Note: WolvenKit uses the .NET 10 in %s." % root)
+                break
+            except (RuntimeError, OSError):
+                _ENV.clear()
+        else:
+            found = ", ".join(
+                "%s%s in %s" % (ver, "" if x64 else " (32-bit)", r)
+                for ver, r, x64 in rts
             )
-        raise ToolError("WolvenKit does not start:\n%s" % e)
+            raise ToolError(
+                "WolvenKit needs the free Microsoft .NET 10 Runtime (64-bit / x64). Install it from %s "
+                "(pick '.NET Runtime 10', x64), then press Refit again.\n\n.NET found on this PC: %s.%s"
+                % (
+                    DOTNET_URL,
+                    found or "none",
+                    "\nA DOTNET_ROOT setting is set on this PC (%s); WolvenKit looks only there."
+                    % (
+                        os.environ.get("DOTNET_ROOT_X64")
+                        or os.environ.get("DOTNET_ROOT")
+                    )
+                    if os.environ.get("DOTNET_ROOT_X64")
+                    or os.environ.get("DOTNET_ROOT")
+                    else "",
+                )
+            )
     if not v.startswith(WK_VERSION):
         log(
             "Note: WolvenKit %s found; this tool is tested with %s."
@@ -527,6 +592,56 @@ def ensure_cages(key, sources, game, wk, log):
         raise
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+_WB = "base\\characters\\base_entities\\woman_base\\"
+V_RIGS = (  # V's body rigs; a mod that replaces one changes how her body (and chest) moves
+    _WB + "woman_base.rig",
+    _WB + "deformations_rigs\\woman_base_deformations.rig",
+    _WB + "deformations_rigs\\woman_base_breasts.rig",
+)
+RIG_NAME = re.compile(
+    r"all.?the.?rigs|(breast|boob|body|chest).?(physic|jiggle|bounce|rig)", re.I
+)
+RIG_PATH = re.compile(r"(physic|jiggle|bounce)", re.I)
+
+
+def rig_mods(game):
+    """Mods in archive\\pc\\mod (subfolders too) that change how V's body moves: they replace one of V's body rigs,
+    hold breast / body physics files, or are named like a rig / physics mod. -> sorted relative paths.
+    ponytail: by content where the archive says (rig hashes, file names), by its name otherwise; a few seconds for
+    hundreds of mods."""
+    want = {rdar.fnv(p) for p in V_RIGS}
+    md, hits = mod_dir(game), set()
+    for dp, _, fs in os.walk(md):
+        for f in fs:
+            if not f.lower().endswith(".archive"):
+                continue
+            p = os.path.join(dp, f)
+            try:
+                r = rdar.Rdar(p)
+                names = r.names
+                hit = bool(want & set(r.hashes())) or (
+                    any(
+                        RIG_PATH.search(n)
+                        and re.search(r"breast|boob|body|chest", n, re.I)
+                        for n in names
+                    )
+                    if names  # the files say what it is (an NPC physics mod is not one)
+                    else bool(RIG_NAME.search(f))
+                )
+            except Exception:  # a broken archive: only its name can tell
+                hit = bool(RIG_NAME.search(f))
+            if hit:
+                hits.add(os.path.relpath(p, md))
+    return sorted(hits, key=str.lower)
+
+
+MOVES_HINT = "Tip: tick 'Make clothes move with the body' so tight clothes follow those mods' movements better."
+RIG_NOTE = (
+    "Note: %s change%s how V's body moves (rig / breast physics). Hyst says such mods make some clothes clip with "
+    "Angel and EVE, mostly when V moves."
+)
 
 
 def vanilla_sources(game):
@@ -1010,18 +1125,28 @@ def run_batch(
     wk_existing=None,
     cancel=None,
     src="vanilla",
+    replace_own=False,
+    copy_moves=False,
 ):
     """Refit every input from body src (the body the outfits are made for) to body tag. -> list of (input, output
     archive or None, message, original missing).
     original missing: True when the original outfit is not in the game (and was not installed now).
     body_files: {body tag: body file the user picked}.
-    cancel: a threading.Event; once set, nothing more is installed and no further outfit is started."""
+    cancel: a threading.Event; once set, nothing more is installed and no further outfit is started.
+    replace_own: also refit parts the outfit already ships a version for body tag of, replacing that version.
+    copy_moves: clothing close to the body gets the body's movement (skin weights), see refit.copy_weights."""
     import refit
 
     cancel = cancel or threading.Event()
     clean_old_work()
     wk, cages = setup(game, src, tag, log, progress, body_files, wk_existing)
     log("Refitting from %s to %s." % (body_name(src), body_name(tag)))
+    if not bodies()["bodies"][tag].get("game"):
+        rigs = rig_mods(game)
+        if rigs:
+            log(RIG_NOTE % (", ".join(rigs), "s" if len(rigs) == 1 else ""))
+            if not copy_moves:
+                log(MOVES_HINT)
     os.makedirs(out_dir, exist_ok=True)
     results = []
     for i, inp in enumerate(inputs):
@@ -1050,6 +1175,8 @@ def run_batch(
                 [inp]
                 if os.path.isfile(inp) and inp.lower().endswith(".archive")
                 else arcs,
+                replace_own,
+                copy_moves,
             )
             missing = bool(res) and original_missing(arcs, game)
             if res and do_install:
