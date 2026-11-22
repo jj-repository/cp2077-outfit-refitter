@@ -13,6 +13,8 @@ with refits you trust (e.g. ones made by hand).
     game folder made in DIR (original missing / already there / Install unticked / Uninstall / closing the window).
     REL: the original outfit's files expected in the game, relative to the game folder. --no-wait: don't wait for
     the refit stopped by closing the window (the process exits while it ends).
+--own-reader OUTFIT: check the own mesh reader (used for meshes WolvenKit can't read) on every mesh of OUTFIT:
+    same positions as WolvenKit's export, byte-exact round trip, displaced write read back by WolvenKit.
 --support DIR --support-outfit OUTFIT (3x: two zips with r6\tweaks, then one more): 'Support report...' tests in the
     real window on two fake games made in DIR (with / without ArchiveXL etc.), incl. a restart (previous session).
 Exit code 0 = everything passed."""
@@ -161,6 +163,85 @@ def check_recover_names(rdar, refit):
         assert not os.path.exists(os.path.join(t, "evil.mesh"))
     finally:
         shutil.rmtree(t, ignore_errors=True)
+
+
+def check_own_reader(wk, game, outfit, work, log):
+    """The own mesh reader (fallback for meshes WolvenKit can't read) on every mesh of an outfit: positions must equal
+    WolvenKit's glb export within one quantization step where WolvenKit can read the mesh; writing the unchanged
+    positions must give back the same content byte for byte, and a real displacement (incl. a grown bounding range)
+    must pass own_refit's checks and, where WolvenKit can read the mesh, come back from WolvenKit as written.
+    -> list of problems."""
+    import numpy as np
+    import core, rdar, refit
+
+    src = os.path.join(work, "src")
+    arcs = core.prepare_input(outfit, os.path.join(work, "in"), lambda m: None)
+    for a in arcs:
+        core.run([wk, "unbundle", a, "-o", src], game)
+    if not all(rdar.Rdar(a).names for a in arcs):
+        refit.recover_names(src, arcs)
+    bad, n_own, n_wk = [], 0, 0
+    for m in sorted(glob.glob(os.path.join(src, "**", "*.mesh"), recursive=True)):
+        name = os.path.basename(m)
+        try:
+            own = refit.OwnMesh(open(m, "rb").read())
+        except Exception as e:
+            log("    %-40s own reader: can't read (%s)" % (name, str(e)[:80]))
+            continue
+        n_own += 1
+        P = own.positions()
+        step = own.qs.max() / 32767.0
+        wkd = os.path.join(work, "glb", os.path.relpath(m, src))
+        os.makedirs(wkd, exist_ok=True)
+        try:
+            core.run([wk, "export", m, "-o", wkd, "-gp", game], game)
+            G = refit.from_glb_space(
+                refit.glb_points(glob.glob(os.path.join(wkd, "*.glb"))[0])
+            )
+        except RuntimeError:
+            G = None
+        line = "    %-40s %6d verts" % (name, len(P))
+        if G is not None:
+            n_wk += 1
+            dv = np.abs(G - P).max() if G.shape == P.shape else float("inf")
+            line += ", vs WolvenKit max %.4f mm (step %.4f mm)" % (
+                dv * 1000,
+                step * 1000,
+            )
+            if dv > step + 1e-5:
+                bad.append(name + ": positions differ from WolvenKit")
+        else:
+            line += ", WolvenKit can't read it"
+        lo, hi = P.min(0), P.max(0)
+        Q = P + 0.01 * np.sin(
+            (P - lo) / np.maximum(hi - lo, 1e-6) * 3.0
+        )  # smooth, up to 1 cm, grows the range
+        try:
+            new = refit.own_refit(own, Q)  # includes the byte-exact round trip
+            line += ", round trip byte-exact, displaced write OK"
+        except Exception as e:
+            bad.append("%s: %s" % (name, e))
+            log(line + ", FAILED: %s" % e)
+            continue
+        if G is not None:
+            chk = os.path.join(work, "chk", os.path.relpath(m, src))
+            os.makedirs(chk, exist_ok=True)
+            open(os.path.join(chk, name), "wb").write(new)
+            core.run(
+                [wk, "export", os.path.join(chk, name), "-o", chk, "-gp", game], game
+            )
+            G2 = refit.from_glb_space(
+                refit.glb_points(glob.glob(os.path.join(chk, "*.glb"))[0])
+            )
+            dq = np.abs(G2 - Q).max()
+            line += ", WolvenKit reads it back within %.4f mm" % (dq * 1000)
+            if dq > refit.OwnMesh(new).qs.max() / 32767.0 + 1e-5:
+                bad.append(name + ": WolvenKit reads other positions back")
+        log(line)
+    log("    own reader: %d meshes read, %d compared with WolvenKit" % (n_own, n_wk))
+    if not n_own:
+        bad.append("own reader read no mesh")
+    return bad
 
 
 def check_original_plan(core):
@@ -920,6 +1001,18 @@ def main(a):
     core.ensure_oodle(game)
     wk = core.ensure_wolvenkit(log, lambda f: None, opt(a, "--wolvenkit"))
     log("WolvenKit OK: %s" % wk)
+    for o in opt_all(a, "--own-reader"):
+        log("\n### own mesh reader on %s" % os.path.basename(o))
+        work = tempfile.mkdtemp(prefix="own_", dir=core._work_root())
+        try:
+            bad = check_own_reader(wk, game, o, work, log)
+        except Exception:
+            bad = ["crashed:\n" + traceback.format_exc()]
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        log("  own reader %s" % ("OK" if not bad else "FAIL: %s" % bad))
+        if bad:
+            fails.append("own reader " + os.path.basename(o))
     barch = dict(x.split("=", 1) for x in opt_all(a, "--body-archive"))
     tags = sorted(
         set(core.bodies()["bodies"])

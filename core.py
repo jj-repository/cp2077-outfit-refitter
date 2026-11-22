@@ -25,7 +25,7 @@ if (
     except OSError:
         DATA = _OLD_DATA
 
-VERSION = "1.3"
+VERSION = "1.4"
 
 
 def documents_dir():

@@ -3,6 +3,8 @@ r"""Refit one clothing mod to another body and pack the result as its own .archi
 Flow: WolvenKit unbundle -> find ArchiveXL "{body}" mesh families in .ent/.app -> per mesh: WolvenKit export glb ->
 move the vertices with the vanilla->target body displacement field (only POSITION bytes change) -> WolvenKit import
 -> rebuild any mesh whose big buffers WolvenKit wrote badly -> WolvenKit pack -> final buffer + index-CRC check.
+A mesh WolvenKit can't read at all (old file format) goes through OwnMesh instead: positions decoded from and
+written back into its own render buffer, no WolvenKit import.
 
 - Dynamic meshes ("*path_{body}.mesh" in .ent/.app): <path>_base_body.mesh is refit and written as NEW
   <path>_<body>.mesh. Nothing of the original mod is overridden; ArchiveXL picks it when that body is installed.
@@ -13,7 +15,7 @@ are male, or already have a version for the target body are
 skipped and listed. A mesh WolvenKit can't re-import is dropped; the rest of the outfit still gets refit.
 """
 
-import base64, glob, json, os, re, shutil, struct, sys
+import base64, glob, json, os, re, shutil, struct
 
 import numpy as np
 from scipy.spatial import cKDTree
@@ -107,27 +109,34 @@ def field(src, tgt):
     return _FIELD[(src, tgt)]
 
 
-def refit_glb(gar, out, src, tgt, off=0.004):
-    """Move every garment vertex by the inverse-distance-weighted displacement of its 8 nearest source-body vertices,
-    then push vertices that ended up inside the target body out to `off` m above the skin (only within 6 cm of it).
-    Only POSITION bytes change: indices, UVs, weights, normals and morph targets stay identical."""
+def move(P, src, tgt, off=0.004):
+    """Move every garment vertex (glb space) by the inverse-distance-weighted displacement of its 8 nearest
+    source-body vertices, then push vertices that ended up inside the target body out to `off` m above the skin
+    (only within 6 cm of it). -> (new positions, number pushed out)."""
     stree, disp, ttree, T, TN = field(src, tgt)
+    dist, nb = stree.query(P, k=8)
+    w = 1.0 / np.maximum(dist, 1e-4) ** 2
+    w /= w.sum(1, keepdims=True)
+    Q = P + (disp[nb] * w[..., None]).sum(1)
+    _, k = ttree.query(Q)
+    depth = ((Q - T[k]) * TN[k]).sum(1)
+    bad = (depth < off) & (np.linalg.norm(Q - T[k], axis=1) < 0.06)
+    Q[bad] += TN[k[bad]] * (off - depth[bad])[:, None]
+    return Q, int(bad.sum())
+
+
+def refit_glb(gar, out, src, tgt):
+    """move() applied to a WolvenKit glb export. Only POSITION bytes change: indices, UVs, weights, normals and
+    morph targets stay identical."""
     d, j, b = load(gar)
     inside = total = 0
     for m in j["meshes"]:
         for pr in m["primitives"]:
             ai = pr["attributes"]["POSITION"]
             P = read(d, j, b, ai)
-            dist, nb = stree.query(P, k=8)
-            w = 1.0 / np.maximum(dist, 1e-4) ** 2
-            w /= w.sum(1, keepdims=True)
-            Q = P + (disp[nb] * w[..., None]).sum(1)
-            _, k = ttree.query(Q)
-            depth = ((Q - T[k]) * TN[k]).sum(1)
-            bad = (depth < off) & (np.linalg.norm(Q - T[k], axis=1) < 0.06)
-            Q[bad] += TN[k[bad]] * (off - depth[bad])[:, None]
+            Q, bad = move(P, src, tgt)
             write(d, j, b, ai, Q)
-            inside += int(bad.sum())
+            inside += bad
             total += len(P)
     jb = json.dumps(j, separators=(",", ":")).encode()
     jb += b" " * ((4 - len(jb) % 4) % 4)
@@ -151,12 +160,11 @@ def glb_points(glb):
 _TREES = {}
 
 
-def far_from_body(glb, cages):
+def far_from_body(pts, cages):
     """True for glasses, hats, props: fewer than 20 vertices within 3 cm of the vanilla or target body. They look
     the same on every body, so they are left alone.
     ponytail: no 'which body was this made for' guess. Angel and EVE are too close to vanilla for a distance test to
     tell them apart reliably (tested 2026-11), so the source is always the vanilla body; users add vanilla downloads."""
-    pts = glb_points(glb)
     near = np.zeros(len(pts), bool)
     for c in cages:
         if c not in _TREES:
@@ -197,6 +205,14 @@ def get_pos(buf, sp, qs, qo):
     return np.vstack(out) / 32767.0 * qs + qo
 
 
+def to_glb(P):  # mesh space -> WolvenKit glb space (x, z, -y)
+    return np.stack([P[:, 0], P[:, 2], -P[:, 1]], 1)
+
+
+def from_glb_space(G):
+    return np.stack([G[:, 0], -G[:, 2], G[:, 1]], 1)
+
+
 def glb_pos(p):
     """Positions per primitive in mesh space (WolvenKit glb = (x, z, -y))."""
     d, j, b = load(p)
@@ -205,7 +221,7 @@ def glb_pos(p):
         for m in j["meshes"]
         for pr in m["primitives"]
     ]
-    return [np.stack([x[:, 0], -x[:, 2], x[:, 1]], 1) for x in g]
+    return [from_glb_space(x) for x in g]
 
 
 def splice(new, orig, override):
@@ -337,7 +353,7 @@ def repair_buffers(done, meshes, pack, glbs, work, wk, game, log, skipped):
 
     for s, t in list(done):
         p = os.path.join(pack, t)
-        if not rdar.bad_buffers(*rdar.loose_mesh(p), meshes[s]):
+        if t not in glbs or not rdar.bad_buffers(*rdar.loose_mesh(p), meshes[s]):
             continue
         log(
             "  WolvenKit wrote a broken big buffer in %s; rebuilding it directly ..."
@@ -353,6 +369,187 @@ def repair_buffers(done, meshes, pack, glbs, work, wk, game, log, skipped):
             skipped.append((s, "could not be rebuilt safely (%s)" % str(e)[:200]))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------- meshes WolvenKit can't read: own reader ----------------
+
+
+class OwnMesh:
+    """A .mesh read without WolvenKit, for files it can't read (e.g. game 1.6-era meshes whose material list it trips
+    over). Only what the refit needs is parsed: the CR2W name/export tables, CMesh.boundingBox and the render blob
+    header (quantization, chunk vertex counts/offsets/strides). Every other property, the material list included, is
+    skipped by its stored size. Positions (Short4N) are decoded in mesh space; with_positions() writes new ones into a
+    copy of the same render buffer (same size, same layout) and patches header floats in place, so nothing but the
+    position xyz shorts, those floats and the buffer table can change (checked in own_refit)."""
+
+    def __init__(self, data):
+        d = self.d = bytes(data)
+        assert d[:4] == b"CR2W", "not CR2W"
+        tabs = [struct.unpack_from("<III", d, 40 + 12 * i) for i in range(10)]
+        self.names = []
+        for i in range(tabs[1][1]):
+            o = tabs[0][0] + struct.unpack_from("<I", d, tabs[1][0] + 8 * i)[0]
+            self.names.append(d[o : d.index(b"\0", o)].decode("latin-1"))
+        ex = {}
+        for i in range(tabs[4][1]):
+            e = struct.unpack_from("<HHIIIII", d, tabs[4][0] + 24 * i)
+            ex.setdefault(self.names[e[0]], []).append(e[4])
+        assert len(ex.get("CMesh", ())) == len(ex.get("rendRenderMeshBlob", ())) == 1, (
+            "not a plain mesh"
+        )
+        mesh = self.struct(ex["CMesh"][0])[0]
+        blob = self.struct(ex["rendRenderMeshBlob"][0])[0]
+        h = self.struct(blob["header"][1])[0]
+        self.qs, self.qs_at = self.vec(h.get("quantizationScale"))
+        self.qo, _ = self.vec(h.get("quantizationOffset"))
+        bb = self.struct(mesh["boundingBox"][1])[0] if "boundingBox" in mesh else {}
+        self.bmin, self.bmin_at = self.vec(bb.get("Min"))
+        self.bmax, self.bmax_at = self.vec(bb.get("Max"))
+        self.spans = []  # (byte offset of the first position, stride, vertex count) per render chunk
+        for c in self.array(h["renderChunkInfos"]):
+            cv = self.struct(c["chunkVertices"][1])[0]
+            vl = self.struct(cv["vertexLayout"][1])[0]
+            el = self.array(vl["elements"])[0]
+            use, typ = (self.names[self.num(el, k, "H")] for k in ("usage", "type"))
+            assert (use, typ, self.num(el, "streamIndex", "B")) == (
+                "PS_Position",
+                "PT_Short4N",
+                0,
+            ), "positions stored as %s %s" % (use, typ)
+            off = self.nums(cv.get("byteOffsets"), "I")
+            stride = self.nums(vl.get("slotStrides"), "B")
+            self.spans.append(
+                (off[0] if off else 0, stride[0], self.num(c, "numVertices", "H"))
+            )
+        assert self.spans and (self.qs > 0).all(), "no render chunks"
+        self.bidx = (
+            struct.unpack_from("<I", d, blob["renderBuffer"][1])[0] & 0xFFFF
+        ) - 1
+        e = rdar.buf_table(d)[self.bidx]
+        self.buf = rdar.seg_raw(d[e[2] : e[2] + e[3]], e[4])
+        assert all(
+            o + (n - 1) * s + 6 <= len(self.buf) for o, s, n in self.spans if n
+        ), "chunk outside the buffer"
+
+    # CR2W value encoding: a struct is 0x00, then (u16 name, u16 type, u32 size incl. itself, value)*, then u16 0;
+    # properties at their default value are not stored. Arrays and static arrays: u32 count + elements.
+    def struct(self, o):
+        assert self.d[o] == 0, "struct expected at %d" % o
+        o, out = o + 1, {}
+        while True:
+            n, t = struct.unpack_from("<HH", self.d, o)
+            if n == 0:
+                return out, o + 2
+            sz = struct.unpack_from("<I", self.d, o + 4)[0]
+            out[self.names[n]] = (self.names[t], o + 8, sz - 4)
+            o += 4 + sz
+
+    def array(self, p):
+        o, out = p[1] + 4, []
+        for _ in range(struct.unpack_from("<I", self.d, p[1])[0]):
+            s, o = self.struct(o)
+            out.append(s)
+        return out
+
+    def num(self, s, k, f):
+        return struct.unpack_from("<" + f, self.d, s[k][1])[0] if k in s else 0
+
+    def nums(self, p, f):
+        if not p:
+            return []
+        n = struct.unpack_from("<I", self.d, p[1])[0]
+        return list(struct.unpack_from("<%d%s" % (n, f), self.d, p[1] + 4))
+
+    def vec(
+        self, p
+    ):  # Vector4 -> (xyz, file offset of each float, None when stored as default 0)
+        s = self.struct(p[1])[0] if p else {}
+        at = [s[k][1] if k in s else None for k in "XYZ"]
+        return np.array(
+            [struct.unpack_from("<f", self.d, a)[0] if a else 0.0 for a in at]
+        ), at
+
+    def positions(self):
+        """Mesh-space positions of all render chunks, stacked in chunk order (= WolvenKit's glb primitive order)."""
+        return get_pos(self.buf, self.spans, self.qs, self.qo)
+
+    def pos_bytes(self):
+        """Indexes into the render buffer of every position x/y/z byte, in vertex order."""
+        return np.concatenate(
+            [
+                (o + np.arange(n)[:, None] * s + np.arange(6)[None, :]).ravel()
+                for o, s, n in self.spans
+            ]
+        )
+
+    def with_positions(self, Q):
+        """CR2W bytes with mesh-space positions Q written into the render buffer (Kraken-compressed with the game's
+        Oodle). The quantization offset never changes; a scale axis grows only when Q leaves its range. The bounding
+        box only grows, and only where Q goes beyond both the stored box and the source vertices (some old files
+        have a box that doesn't hold their own vertices; it stays as it was).
+        ponytail: a bounding-box axis stored as default 0 is left as it is (culling margin only)."""
+        d = bytearray(self.d)
+        qs = self.qs.copy()
+        for i in np.nonzero(np.abs(Q - self.qo).max(0) > qs * (1 + 1e-6))[0]:
+            qs[i] = float(np.float32(np.abs(Q[:, i] - self.qo[i]).max() * 1.001))
+            struct.pack_into("<f", d, self.qs_at[i], qs[i])
+        P = self.positions()
+        lo, hi = Q.min(0), Q.max(0)
+        blo, bhi = np.minimum(self.bmin, P.min(0)), np.maximum(self.bmax, P.max(0))
+        for i in range(3):
+            if lo[i] < blo[i] and self.bmin_at[i]:
+                struct.pack_into("<f", d, self.bmin_at[i], lo[i])
+            if hi[i] > bhi[i] and self.bmax_at[i]:
+                struct.pack_into("<f", d, self.bmax_at[i], hi[i])
+        qi = np.clip(np.round((Q - self.qo) / qs * 32767.0), -32767, 32767).astype(
+            "<i2"
+        )
+        buf = np.frombuffer(bytearray(self.buf), np.uint8)
+        buf[self.pos_bytes()] = qi.view(np.uint8).ravel()
+        return splice(bytes(d), bytes(d), {self.bidx: buf.tobytes()})
+
+
+def cr2w_content(d):
+    """(objects part with the header CRC and the buffer table's offsets/stored sizes/CRCs zeroed, [decoded buffers]):
+    what must stay equal when only the compression of a buffer changes."""
+    oend, toff, ents = rdar.cr2w_bufs(d)
+    h = bytearray(d[:oend])
+    h[28:36] = bytes(8)
+    h[40 + 5 * 12 + 8 : 40 + 5 * 12 + 12] = bytes(4)
+    for i in range(len(ents)):
+        h[toff + 24 * i + 8 : toff + 24 * i + 16] = bytes(8)
+        h[toff + 24 * i + 20 : toff + 24 * i + 24] = bytes(4)
+    return bytes(h), [rdar.seg_raw(d[e[2] : e[2] + e[3]], e[4]) for e in ents]
+
+
+def own_refit(m, Q):
+    """m.with_positions(Q) after proving the writer on this exact file: the unchanged positions must give back the
+    same content byte for byte (save(load(x)) == x). The result is re-read: it may differ from the source only in
+    the position bytes and the header floats that were patched, and every position is within half a quantization
+    step of Q."""
+    assert cr2w_content(m.with_positions(m.positions())) == cr2w_content(m.d), (
+        "round trip not byte-exact"
+    )
+    new = m.with_positions(Q)
+    (h0, b0), (h1, b1) = cr2w_content(m.d), cr2w_content(new)
+    floats = {a + k for a in m.qs_at + m.bmin_at + m.bmax_at if a for k in range(4)}
+    assert len(h0) == len(h1) and all(
+        i in floats for i in range(len(h0)) if h0[i] != h1[i]
+    ), "header changed"
+    assert len(b0) == len(b1) and all(
+        x == y for i, (x, y) in enumerate(zip(b0, b1)) if i != m.bidx
+    )
+    r0, r1 = np.frombuffer(b0[m.bidx], np.uint8), np.frombuffer(b1[m.bidx], np.uint8)
+    keep = np.ones(len(r0), bool)
+    keep[m.pos_bytes()] = False
+    assert len(r0) == len(r1) and (r0[keep] == r1[keep]).all(), (
+        "render buffer changed outside the positions"
+    )
+    m2 = OwnMesh(new)
+    assert (np.abs(m2.positions() - Q) <= m2.qs / 32767.0 * 0.5 + 1e-6).all(), (
+        "positions not written"
+    )
+    return new
 
 
 def buffer_gate(arch, src_of):
@@ -527,21 +724,41 @@ def refit_mod(
     done, glbs = [], {}
     for n, (s, t) in enumerate(jobs):
         progress(0.8 * n / len(jobs))
+        own = None
         try:
             run([wk, "export", meshes[s], "-o", glbd, "-gp", game], game)
+            g = os.path.join(glbd, os.path.splitext(os.path.basename(s))[0] + ".glb")
+            pts = glb_points(g)
         except RuntimeError:
-            skipped.append((s, "WolvenKit can't read this mesh"))
-            continue
-        g = os.path.join(glbd, os.path.splitext(os.path.basename(s))[0] + ".glb")
+            try:  # e.g. game 1.6-era meshes: the own reader needs only the vertex data
+                own = OwnMesh(open(meshes[s], "rb").read())
+                pts = to_glb(own.positions())
+            except Exception:
+                skipped.append((s, "WolvenKit can't read this mesh"))
+                continue
         stem = os.path.splitext(os.path.basename(s))[0]
         if not BODY_SUFFIX.search(stem) and far_from_body(
-            g, (cages["van"], cages[tgt])
+            pts, (cages["van"], cages[tgt])
         ):
             skipped.append((s, "not worn on the body (same on every body)"))
             continue
         tdir = os.path.dirname(t)
         os.makedirs(os.path.join(raw, tdir), exist_ok=True)
         os.makedirs(os.path.join(pack, tdir), exist_ok=True)
+        if own:
+            Q, pushed = move(pts, cages["van"], cages[tgt])
+            try:
+                data = own_refit(own, from_glb_space(Q))
+            except Exception as e:
+                skipped.append((s, "could not be written safely (%s)" % str(e)[:200]))
+                continue
+            open(os.path.join(pack, t), "wb").write(data)
+            log(
+                "  %s: %d vertices moved, %d pushed out of the skin (read with the tool's own reader, old file "
+                "format)" % (os.path.basename(t), len(Q), pushed)
+            )
+            done.append((s, t))
+            continue
         tglb = os.path.join(raw, os.path.splitext(t)[0] + ".glb")
         g2 = os.path.join(
             work, "srcglb", t[:-5] + ".glb"
@@ -556,7 +773,7 @@ def refit_mod(
         )
         shutil.copy(meshes[s], os.path.join(pack, t))
         done.append((s, t))
-    if done:
+    if glbs:
         imp = run([wk, "import", raw, "-o", pack, "-k"], game, ok="Imported")
         m = re.search(r"Imported (\d+)/(\d+)", imp)
         if not m:
@@ -566,7 +783,7 @@ def refit_mod(
         for s, t in list(
             done
         ):  # a mesh WolvenKit could not re-import is still the unrefit copy -> drop it
-            if open(os.path.join(pack, t), "rb").read() == open(meshes[s], "rb").read():
+            if t in glbs and open(os.path.join(pack, t), "rb").read() == open(meshes[s], "rb").read():
                 os.remove(os.path.join(pack, t))
                 done.remove((s, t))
                 skipped.append((s, "WolvenKit can't write this mesh back"))
@@ -575,7 +792,7 @@ def refit_mod(
     for s, why in skipped:
         log("  skipped %s: %s" % (os.path.basename(s), why))
     if not done:
-        if any("WolvenKit" in w or "rebuilt" in w for _, w in skipped):
+        if any("WolvenKit" in w or "rebuilt" in w or "safely" in w for _, w in skipped):
             raise ToolError("none of the meshes could be refit (see the list above).")
         log("Nothing needed a refit.")
         return None

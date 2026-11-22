@@ -115,8 +115,10 @@ It contains no file contents, and your Windows user name is replaced. You can op
 - **Old outfits work too** (since 1.3): many outfits from before game 2.0 were packed without file names.
   The tool finds the names again from the outfit's other files and refits them like any other outfit. If it
   gives you a version made for another body (EBB, RB, ...), the log warns you; get the vanilla one if there is one.
-- **Some parts can't be refit**: a few meshes WolvenKit can't read or write, and clothing in old outfits
-  that no other file points to. The tool skips those parts, tells you, and refits the rest.
+  Since 1.4, meshes in an old file format that WolvenKit can't read are read and refit by the tool itself
+  (the log says "read with the tool's own reader").
+- **Some parts can't be refit**: a few meshes neither WolvenKit nor the tool's own reader can read, meshes
+  WolvenKit can't write, and clothing in old outfits that no other file points to. The tool skips those parts, tells you, and refits the rest.
 - **Safety check**: before writing a file, the tool checks every mesh in it. If anything is broken, it
   writes nothing and tells you, instead of giving you a file that could crash the game.
 - **Files starting with `!!!`** replace the outfit's meshes. They load before most mods. If another mod
@@ -167,7 +169,15 @@ the WolvenKit team or Nexus Mods.
 6. WolvenKit 9.1.1 can write very big mesh buffers (over ~1.4 MB) in a way the game can't read.
    Those meshes are rebuilt directly (positions written into the original render buffer, compressed
    with the game's own Oodle library) and verified with a WolvenKit round trip. If that fails, the mesh is skipped.
-7. WolvenKit packs the archive. The final check decodes every buffer of every mesh with the game's
+7. A mesh WolvenKit can't read at all (seen with game 1.6-era meshes: WolvenKit 9.1.1 and 10.0 beta fail
+   on their material list) is read by the tool itself: it parses only the CR2W tables, the bounding box
+   and the render blob header (quantization, per-chunk vertex counts, offsets and strides), skips every
+   other property by its stored size, and decodes the positions straight from the render buffer. The
+   moved positions are written back into the same buffer (same size and layout), compressed with the
+   game's Oodle library. Before writing, the unchanged positions must give back the same content byte for
+   byte; the result may differ from the source only in position bytes and the patched quantization /
+   bounding-box floats. WolvenKit is not used for that mesh's import.
+8. WolvenKit packs the archive. The final check decodes every buffer of every mesh with the game's
    Oodle library, compares zero-filled tails against the source mesh, and checks the archive index
    checksum (a wrong one crashes the game at startup). Any problem = no file is written.
 
@@ -199,7 +209,7 @@ Output:
 | `outfit_refitter.py` | Entry point: window, `--refit` command line, `--selftest` |
 | `gui.py` | The window (Python's built-in tkinter) |
 | `core.py` | Game detection, WolvenKit download, body shapes, unpacking downloads, install list |
-| `refit.py` | The refit itself, the WolvenKit buffer repair, the final safety check |
+| `refit.py` | The refit itself, the WolvenKit buffer repair, the own mesh reader (old meshes), the final safety check |
 | `rdar.py` | Reading `.archive` / CR2W files, the game's Oodle library, buffer checks |
 | `bodies.json` | Supported bodies |
 | `support.py` | The session record and the support report |
@@ -239,7 +249,9 @@ the window for two seconds. `--gui-install <folder> --gui-install-outfit <outfit
 Install tests in the real window on a fake game folder it makes in `<folder>` (original missing, original already
 there, Install unticked, Uninstall, closing the window mid-refit); the real game folder is only read.
 `--support <folder> --support-outfit <outfit>` (three times) tests **Support report...** in the real window on two
-fake game folders (with and without ArchiveXL etc.), including a restart. Exit code 0 = passed. In the windowed `.exe`, the text goes to
+fake game folders (with and without ArchiveXL etc.), including a restart. `--own-reader <outfit>` checks the
+own mesh reader on every mesh of an outfit: same positions as WolvenKit's export, byte-exact round trip, and a
+displaced write that WolvenKit reads back as written. Exit code 0 = passed. In the windowed `.exe`, the text goes to
 `%TEMP%\OutfitRefitter_console.log`.
 
 ### Adding a body
