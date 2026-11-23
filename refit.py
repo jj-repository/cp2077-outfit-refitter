@@ -185,7 +185,9 @@ def move(P, src, tgt, off=0.004):
     extra = nipple_room(tgt)
     if extra:
         tips, r = breast_tips(tgt), 0.03
-        near = np.where(np.linalg.norm(Q[:, None] - tips[None], axis=2).min(1) < r + 0.02)[0]
+        near = np.where(
+            np.linalg.norm(Q[:, None] - tips[None], axis=2).min(1) < r + 0.02
+        )[0]
         if len(near):
             h, q, n = skin_height(Q[near], tgt)
             dq = np.linalg.norm(q[:, None] - tips[None], axis=2).min(1)
@@ -1258,7 +1260,9 @@ def shapes_by_mesh(js):
     for f in files:  # mesh .ent (relative path as the game writes it) -> its mesh paths
         if f.lower().endswith(".ent.json"):
             rel = os.path.relpath(f, js)[: -len(".json")].lower()
-            txt = open(f, encoding="utf-8", errors="ignore").read().replace("\\\\", "\\")
+            txt = (
+                open(f, encoding="utf-8", errors="ignore").read().replace("\\\\", "\\")
+            )
             ents[rel] = MESH_PATH.findall(txt)
 
     def walk(o):
@@ -1314,6 +1318,7 @@ def refit_mod(
     origin=None,
     replace_own=False,
     copy_moves=False,
+    no_top=False,
 ):
     """arcs: the outfit's .archive files, made for body src_body; refit to body tgt (body tags; cages: {tag: glbs}).
     origin: files whose surroundings hold the outfit's r6\\tweaks .yaml (default arcs), for the garment layers.
@@ -1322,6 +1327,8 @@ def refit_mod(
     copy_moves: clothing close to the body gets the body's skin weights (copy_weights), so it moves with the body,
     also with rig / breast physics mods. Meshes written without WolvenKit's import (own reader, rebuilt big
     buffers) keep their own weights; the log says so.
+    no_top: the outfit is worn with nothing over the chest (pasties, a harness): fit to each body's uncovered chest
+    ('uncovered' in bodies.json) unless the mesh switches the chest to a shape itself.
     -> path of the written refit archive, or None if nothing needed a refit.
     Raises ToolError when nothing could be refit or the final safety check fails."""
     sx, tx = xl_name(src_body), xl_name(tgt)
@@ -1409,9 +1416,19 @@ def refit_mod(
             jobs.append((s, t))
         else:
             skipped.append((pat, "no %s mesh to start from" % sx))
+    body_files = {m.lower() for m in bodies()["meshes"]} | {
+        m.lower()
+        for b in bodies()["bodies"].values()
+        for m in b.get("shapes", {}).values()
+    }
     for k in meshes:
         stem = os.path.splitext(os.path.basename(k))[0]
         if k in covered or HELPER.search(k):
+            continue
+        if (
+            k in body_files
+        ):  # bundled with the outfit: refit, it would replace the user's own body
+            skipped.append((k, "a body file, not clothing (left out of the refit)"))
             continue
         if MALE.search(k):
             skipped.append((k, "male mesh"))
@@ -1456,6 +1473,7 @@ def refit_mod(
                     if s in slots
                 )
             )
+    no_top_said = []
     worn = []  # (slot, [(LOD, refit positions)]) of the refit garments with a layer slot
     done, glbs = [], {}
 
@@ -1474,9 +1492,35 @@ def refit_mod(
     for n, (s, t) in enumerate(jobs):
         progress(0.8 * n / len(jobs))
         own = None
+        if b"meshMeshParamCloth" in open(meshes[s], "rb").read():
+            # cloth physics: the simulation keeps its own copy of the shape; a changed mesh can crash the game
+            as_is(s, t, "it has cloth physics; changing its shape can crash the game")
+            continue
         tag = mesh_shape(shape_tags, s, sx) or mesh_shape(shape_tags, t, tx)
-        c_src = shape_cage(cages[src_body], src_body, tag)
-        c_tgt = shape_cage(cages[tgt], tgt, tag)
+
+        def cage_for(b):
+            c = shape_cage(cages[b], b, tag)
+            if (
+                no_top and c == cages[b]
+            ):  # untagged, or this body lacks the tag: its uncovered chest
+                c = shape_cage(cages[b], b, bodies()["bodies"][b].get("uncovered"))
+            return c
+
+        c_src, c_tgt = cage_for(src_body), cage_for(tgt)
+        if no_top and not no_top_said:
+            no_top_said.append(1)
+            unc = bodies()["bodies"][tgt].get("uncovered")
+            log(
+                "  'Worn without a top': "
+                + (
+                    "%s's chest looks the same with or without a top" % body_name(tgt)
+                    if not unc
+                    else "fit to %s's uncovered chest" % body_name(tgt)
+                    if shape_cage(cages[tgt], tgt, unc) != cages[tgt]
+                    else "%s's uncovered chest is not in your body files: the normal shape is used"
+                    % body_name(tgt)
+                )
+            )
         if tag and (c_src != cages[src_body] or c_tgt != cages[tgt]):
             log(
                 "  %s: the outfit switches the chest to its '%s' shape; fit to that shape%s"
@@ -1489,8 +1533,12 @@ def refit_mod(
                 )
             )
         try:
-            run([wk, "export", meshes[s], "-o", glbd, "-gp", game], game)
             g = os.path.join(glbd, os.path.splitext(os.path.basename(s))[0] + ".glb")
+            if os.path.exists(
+                g
+            ):  # same file name in another folder: never read the earlier one's export
+                os.remove(g)
+            run([wk, "export", meshes[s], "-o", glbd, "-gp", game], game)
             pts = glb_points(g)
         except (
             ToolError

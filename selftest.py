@@ -12,6 +12,8 @@ with refits you trust (e.g. ones made by hand).
 --layers TAG=OUTFIT=STEM,STEM,...: garment layers (mesh stems inner -> outer): outer-layer vertices below an inner
     layer in 1.5 (recomputed) and in the output (must be 0).
 --chest TAG=OUTFIT: garment vertices inside the body as the game shows it in clothes (must be 0).
+    TAG:SHAPE=OUTFIT as if the outfit carried chest shape tag SHAPE; TAG:notop=OUTFIT with 'Worn without a top'
+    (checked against the uncovered chest).
 --replace-own TAG=OUTFIT: an outfit with its own TAG version: left alone without the option, refit into a '!!!'
     archive with it.
 --motion TAG=OUTFIT: 'Make clothes move with the body': the chest bones move 2 cm, nothing may end up inside.
@@ -304,6 +306,26 @@ def check_install_rules(core):
             "EveRefit_X.archive",
             "Other.archive",
         ], core.installed()
+        # an updated Nexus download (new version / time in its name) replaces the older refit (1.9)
+        core.install(
+            [made("AngelRefit_N_1_0_1700000000.archive")],
+            game,
+            msgs.append,
+            "N-123-1-0-1700000000",
+        )
+        core.install(
+            [made("AngelRefit_N.archive")], game, msgs.append, "N-123-1-1-1800000000"
+        )
+        assert "AngelRefit_N_1_0_1700000000.archive" not in [
+            e["file"] for e in core.installed()
+        ], msgs
+        assert core.outfit_name("N-123-1-1-1800000000.zip") == "N"
+        # REDmod installs count as in the game (1.9)
+        os.makedirs(os.path.join(game, "mods", "Some", "archives"))
+        open(
+            os.path.join(game, "mods", "Some", "archives", "RedOne.archive"), "w"
+        ).close()
+        assert "redone.archive" in core.archives_in_game(game)
         core.uninstall(
             [e for e in core.installed() if e["file"] != "Other.archive"], msgs.append
         )
@@ -1669,6 +1691,11 @@ def chest_test(core, wk, game, spec, run_case, barch, log, fails):
     # check against is the body with that chest add-on, and the log must say the shape is used
     tag, inp = spec.split("=", 1)
     tag, _, shape = tag.partition(":")
+    no_top = (
+        shape == "notop"
+    )  # 'Worn without a top': checked against the body's uncovered chest
+    if no_top:
+        shape = core.bodies()["bodies"][tag].get("uncovered", "")
     log(
         "\n### clothed chest, vanilla -> %s%s: %s"
         % (tag, " (%s)" % shape if shape else "", os.path.basename(inp))
@@ -1682,11 +1709,25 @@ def chest_test(core, wk, game, spec, run_case, barch, log, fails):
     work = tempfile.mkdtemp(prefix="chest_", dir=core._work_root())
     real = refit.mesh_shape
     try:
-        if shape:  # every mesh of the outfit as if its .app carried the tag
+        if (
+            shape and not no_top
+        ):  # every mesh of the outfit as if its .app carried the tag
             refit.mesh_shape = lambda tags, rel, xl: shape
         seen = []
-        arch = run_case("vanilla", tag, inp, os.path.join(work, "out"), seen)
-        if shape and not any("switches the chest to its" in m for m in seen):
+        arch = run_case(
+            "vanilla", tag, inp, os.path.join(work, "out"), seen, no_top=no_top
+        )
+        if no_top and not any(
+            "'Worn without a top': fit to" in m and "normal shape" not in m
+            for m in seen
+        ):
+            log("FAIL: the log doesn't say the uncovered chest is used")
+            fails.append("chest no top log")
+        if (
+            shape
+            and not no_top
+            and not any("switches the chest to its" in m for m in seen)
+        ):
             log("FAIL: the log doesn't say the chest shape is used")
             fails.append("chest shape log " + shape)
         if not arch:
@@ -2083,7 +2124,7 @@ def main(a):
 
     seen = []  # log lines of the last run_case
 
-    def run_case(src, tag, inp, dest, seen_out=None):
+    def run_case(src, tag, inp, dest, seen_out=None, **opt):
         """One refit like the window does it, plus the safety check of the output. -> output archive or None.
         seen_out: a list that gets the refit's log lines."""
         log("\n### case %s: %s -> %s" % (os.path.basename(inp), src, tag))
@@ -2096,6 +2137,7 @@ def main(a):
             lambda m: (seen.append(m), log(m)),
             body_files=barch,
             src=src,
+            **opt,
         )
         arch = res[0][1]
         if seen_out is not None:

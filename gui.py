@@ -102,8 +102,10 @@ Steps, in order
 5. Add the outfit: drag its download (zip / 7z / rar), its unpacked folder or its .archive file into the big list. Or use 'Add outfit...' / 'Add folder...'. You can add several outfits at once, but 'Outfit made for' counts for all of them, so add outfits for one body at a time. If a download has versions for several bodies, the tool uses the one for 'Outfit made for' (or the vanilla one).
 
 6. Install: tick 'Install into the game when done' if the tool should put the refit straight into your game. If the original outfit is not in your game yet, the tool installs it too, from the same download. Leave it unticked to only save the file in the output folder; then nothing goes into your game.
-   Some outfits already come with their own version for your body (for example a built-in Angel version). The tool leaves those parts alone. If you'd rather have the tool's refit for them too (for example because the built-in version clips), tick 'Replace the outfit's own version for my body'. Uninstall the refit to get the outfit's own version back.
-   'Make clothes move with the body': tight clothes then follow the body exactly when V moves, also with rig or breast physics mods (the log tells you if you have such mods). Loose parts like a hanging skirt keep their own movement. Leave it off if you don't use such mods and the clothes look right.
+   Some outfit downloads already contain a ready-made version for the body you picked under 'Your body mod' (for example an Angel version made by the outfit's author). The tool leaves that version alone and only refits the parts that have none. If the author's version doesn't fit well (for example it clips), tick 'Replace the outfit's own version': the tool then refits those parts too, and its version is used instead. Uninstall the refit to get the outfit's own version back.
+   'Make clothes move with the body': tight clothes then follow the body exactly when V moves, also with rig or breast physics mods (the log tells you if you have such mods). Loose parts like a hanging skirt keep their own movement. It's on by default; untick it only if a part moves wrong (for example a skirt sticks to the legs).
+   'Worn without a top': tick it only for items you wear with nothing else over the chest, like pasties, nipple covers or a harness on the bare chest. With nothing over it, Angel's and EVE's chest has another shape than under clothes, and the tool then fits to that shape. Leave it unticked for everything else, also for tops and bras. Refit these items on their own, not together with a top. Exception: with some tops the game keeps the bare chest shape under them, and the nipples poke through. If that happens, refit that top again with 'Worn without a top' ticked. It's made for chest size 'Big' (what Hyst recommends) and is unticked again every time you start the tool.
+   Not sure what an option does? Move the mouse over the small '?' next to it.
 
 7. Click 'Refit'. The bar and the log below show the progress. The first run takes longer: the tool downloads WolvenKit (about 45 MB) and reads the body shapes once. While it runs, the button says 'Stop': click it to stop; nothing is kept from the outfit it was working on.
 
@@ -121,9 +123,12 @@ Good to know
 - Outfits with several layers (for example a top, a shirt and a jacket): the tool keeps each layer 1 mm above the one under it, so the shirt doesn't poke through the jacket. It knows the order from the outfit's own files (when the outfit uses ArchiveXL outfit slots such as TorsoUnder / TorsoMiddle / TorsoOuter). Add the outfit's download, not only its .archive, so the tool can read them.
 - Chest size: Hyst tells you to set V's chest size ('Breast') to 'Big' for Angel. That setting changes how V looks nude; in clothes her chest is the same with every setting, so refits fit all of them.
 - Some outfits switch Angel's or EVE's chest to a different shape while they're worn ('natural' or 'squish', Hyst's shape add-ons). The tool sees that and fits those outfits to that shape; the log says so.
+- Pasties, nipple covers or a harness on the bare chest: tick 'Worn without a top' for them (see step 6). Refit them on their own, not together with a top.
+- A download with several colours of the same clothes: the tool refits the colour installed in your game (or the first one, and says so).
+- Parts with cloth physics (some skirts and coats) stay unchanged, because changing them can crash the game. They may clip a little.
 - Layered outfits: when something is worn over a piece, the game squashes that piece toward the body. The tool fits that squashed shape to your body too.
 - Angel and EVE show nipples also under clothes. Refits leave a little more room over the breast tips so they don't poke through.
-- Hyst says that rig mods which change the breast area (for example "All the Rigs") and breast physics mods make some clothes clip with Angel and EVE, mostly when V moves. The tool tells you in the log if you have such mods; tick 'Make clothes move with the body' so tight clothes follow those movements.
+- Hyst says that rig mods which change the breast area (for example "All the Rigs") and breast physics mods make some clothes clip with Angel and EVE, mostly when V moves. The tool tells you in the log if you have such mods; keep 'Make clothes move with the body' ticked so tight clothes follow those movements.
 - 'WolvenKit...' lets you use a WolvenKit you already have instead of downloading it.
 
 Common problems
@@ -151,6 +156,38 @@ ERROR_LINES = (
     "Not removed",
     "Could not save the settings",
 )
+
+
+def tip_icon(parent, text):
+    """A small '?' after an option; hovering over it shows text."""
+    q = ttk.Label(parent, text=" ? ", foreground="#1a5fb4", cursor="question_arrow")
+    q.pack(side="left")
+    pop = []
+
+    def show(e):
+        t = tk.Toplevel(q)
+        t.wm_overrideredirect(True)
+        t.wm_geometry("+%d+%d" % (e.x_root + 12, e.y_root + 12))
+        tk.Label(
+            t,
+            text=text,
+            wraplength=360,
+            justify="left",
+            background="#ffffe0",
+            relief="solid",
+            borderwidth=1,
+            padx=6,
+            pady=4,
+        ).pack()
+        pop.append(t)
+
+    def hide(e):
+        while pop:
+            pop.pop().destroy()
+
+    q.bind("<Enter>", show)
+    q.bind("<Leave>", hide)
+    return q
 
 
 class App:
@@ -236,18 +273,58 @@ class App:
         self.own = tk.BooleanVar(value=self.s.get("replace_own", False))
         ttk.Checkbutton(
             o2,
-            text="Replace the outfit's own version for my body (if it has one)",
+            text="Replace the outfit's own version (if it already comes with one for 'Your body mod')",
             variable=self.own,
         ).pack(side="left")
         o3 = ttk.Frame(root)
         o3.pack(fill="x", **pad)
-        # off by default: clothes keep their own movement (skin weights)
-        self.moves = tk.BooleanVar(value=self.s.get("copy_moves", False))
+        # on by default since 1.9; new key so 1.7/1.8's saved "off" (the old default) doesn't stick
+        self.moves = tk.BooleanVar(value=self.s.get("move_with_body", True))
         ttk.Checkbutton(
             o3,
             text="Make clothes move with the body (helps with rig / breast physics mods)",
             variable=self.moves,
         ).pack(side="left")
+        o4 = ttk.Frame(root)
+        o4.pack(fill="x", **pad)
+        # not saved: off at every start, it's for single items worn without a top (pasties, a harness)
+        self.no_top = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            o4,
+            text="Worn without a top (pasties, nipple covers, a harness on the bare chest)",
+            variable=self.no_top,
+        ).pack(side="left")
+        for fr, txt in (
+            (
+                o,
+                "Puts the finished outfit into your game for you. If the original outfit is missing, "
+                "it's added too. You can take it out again with 'Uninstall'.",
+            ),
+            (
+                o2,
+                "Some outfit downloads already contain a ready-made version for the body you picked under "
+                "'Your body mod' (for example an Angel version made by the outfit's author). "
+                "Normally the tool doesn't touch that version and only refits the parts that have none. "
+                "Tick this if the author's version doesn't fit well: the tool then refits those parts too, "
+                "and its version is used instead of the author's.",
+            ),
+            (
+                o3,
+                "Clothes close to the body move along with it, like skin. Keep this ticked. "
+                "Only untick it if something moves wrong, for example a skirt sticks to the legs.",
+            ),
+            (
+                o4,
+                "Tick this only for things you wear on the bare chest with nothing over them, "
+                "like pasties, nipple covers or a harness. "
+                "Without a top, the chest looks different than under clothes, so these items need a different fit. "
+                "Leave it unticked for everything else, also tops and bras. "
+                "Exception: if the nipples still poke through a top after refitting, refit that top again "
+                "with this ticked. "
+                "Refit these items on their own. It turns off again every time you start the tool.",
+            ),
+        ):
+            tip_icon(fr, txt)
 
         a = ttk.Frame(root)
         a.pack(fill="x", **pad)
@@ -296,6 +373,7 @@ class App:
             (self.inst, "install box "),
             (self.own, "replace own version box "),
             (self.moves, "move with the body box "),
+            (self.no_top, "worn without a top box "),
         ):
             traces.append(
                 (
@@ -373,7 +451,7 @@ class App:
             body=self.tag(),
             install=self.inst.get(),
             replace_own=self.own.get(),
-            copy_moves=self.moves.get(),
+            move_with_body=self.moves.get(),
         )
         try:
             core.save_settings(self.s)
@@ -576,6 +654,7 @@ class App:
                 install=self.inst.get(),
                 replace_own=self.own.get(),
                 copy_moves=self.moves.get(),
+                no_top=self.no_top.get(),
                 **{"from": self.src_tag()},
             )
             text = support.build(
@@ -714,7 +793,7 @@ class App:
         self.save()
         self.rec(
             "action",
-            "Refit started: %d outfit(s), made for %s, body %s, install %s, replace own version %s, move with the body %s, game %s, "
+            "Refit started: %d outfit(s), made for %s, body %s, install %s, replace own version %s, move with the body %s, without a top %s, game %s, "
             "output %s"
             % (
                 len(files),
@@ -723,6 +802,7 @@ class App:
                 "ticked" if self.inst.get() else "unticked",
                 "ticked" if self.own.get() else "unticked",
                 "ticked" if self.moves.get() else "unticked",
+                "ticked" if self.no_top.get() else "unticked",
                 self.game.get(),
                 self.out_dir(),
             ),
@@ -743,6 +823,7 @@ class App:
             self.src_tag(),
             self.own.get(),
             self.moves.get(),
+            self.no_top.get(),
         )
         # the worker gets only the queue and plain values, never the window objects (Tk is not thread-safe)
         self.worker = threading.Thread(
@@ -752,7 +833,19 @@ class App:
 
     @staticmethod
     def work(
-        q, files, tag, game, out, inst, body_files, wk_existing, cancel, src, own, moves
+        q,
+        files,
+        tag,
+        game,
+        out,
+        inst,
+        body_files,
+        wk_existing,
+        cancel,
+        src,
+        own,
+        moves,
+        no_top,
     ):
         put = lambda m: q.put(("log", m))
         try:
@@ -770,6 +863,7 @@ class App:
                 src,
                 own,
                 moves,
+                no_top,
             )
             ok = [r for r in res if r[1]]
             put("")
@@ -874,6 +968,7 @@ def drive(
     replace_own=False,
     copy_moves=False,
     stop_on=None,
+    no_top=False,
 ):
     """Self-test: open the real window, drop an outfit on it, pick the body (and game folder, body file, Install
     tick, 'Replace the outfit's own version' tick), press Refit, wait for the result. close_on: text; when it shows up in the log, the window gets a real
@@ -902,6 +997,7 @@ def drive(
     app.inst.set(install)
     app.own.set(replace_own)
     app.moves.set(copy_moves)
+    app.no_top.set(no_top)
     app.body.set(core.body_name(tag))
     app.show_body()
     t0 = time.time()
@@ -933,7 +1029,12 @@ def drive(
                 root.destroy()
                 return
         elif state["step"] == "wait_done":
-            if stop_on and app.busy and not state.get("stopped") and any(stop_on in m for m in lines):
+            if (
+                stop_on
+                and app.busy
+                and not state.get("stopped")
+                and any(stop_on in m for m in lines)
+            ):
                 log("  clicking 'Stop' during the refit")
                 state["stopped"] = app.go["text"] == "Stop"
                 app.go.invoke()

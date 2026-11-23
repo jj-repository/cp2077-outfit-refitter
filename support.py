@@ -233,7 +233,9 @@ def _is_body(path):
     """Does this .archive hold the female body mesh (a body mod), not just a body-like name (refits, bodysuits)?
     -> True / False / None (can't be read: broken or cut off, worth showing)."""
     try:
-        return core.rdar.fnv(core.bodies()["meshes"][0]) in core.rdar.Rdar(path).hashes()
+        return (
+            core.rdar.fnv(core.bodies()["meshes"][0]) in core.rdar.Rdar(path).hashes()
+        )
     except Exception:
         return None
 
@@ -600,6 +602,10 @@ def build(session, settings, game, out, outfits, refits):
         L.append(
             "Make clothes move with the body: %s"
             % ("ticked" if settings.get("copy_moves") else "not ticked")
+        )
+        L.append(
+            "Worn without a top: %s"
+            % ("ticked" if settings.get("no_top") else "not ticked")
         )
         L.append("Output folder: %s" % out)
         L.append("Game folder: %s" % game)

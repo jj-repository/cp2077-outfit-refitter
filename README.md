@@ -91,12 +91,17 @@ need a hand-made refit. Always look at the result in game.
    It also checks whether the original outfit is in your game. If it is not, the tool installs it too,
    from the same download. An original that is already installed is left as it is.
    The tick is off at first, so nothing goes into your game unless you ask for it.
-   - **Replace the outfit's own version for my body** (off at first): some outfits already come with a version for
-     your body (for example a built-in Angel version). The tool leaves those parts alone, unless you tick this box;
-     then it refits them too and its refit replaces the built-in version. Uninstall the refit to get it back.
-   - **Make clothes move with the body** (off at first): tight clothes then follow the body exactly when V moves,
+   - **Replace the outfit's own version** (off at first): some outfit downloads already contain a ready-made version
+     for the body you picked under *Your body mod* (for example an Angel version made by the outfit's author). The
+     tool leaves that version alone, unless you tick this box; then it refits those parts too and its refit is used
+     instead of the author's version. Uninstall the refit to get it back.
+   - **Make clothes move with the body** (on by default since 1.9): tight clothes then follow the body exactly when V moves,
      also with rig or breast physics mods. Loose parts like a hanging skirt, and rigid parts like a knife or a bag,
      keep their own movement.
+   - **Worn without a top**: tick it only for items you wear with nothing else over the chest (pasties, nipple covers,
+     a harness on the bare chest). Uncovered, Angel's and EVE's chest has another shape than under clothes; the tool
+     then fits to that shape. Leave it unticked for everything else, also tops and bras. Made for chest size *Big*
+     (what Hyst recommends); unticked again at every start.
 6. Click **Refit**.
    - The **first time** it downloads WolvenKit (about 45 MB) and reads the body shapes from your game.
      This takes a minute or two and only happens once.
@@ -186,11 +191,20 @@ first to see what's inside.
   nude; in clothes her chest is the same with every setting, so refits fit all of them.
 - **Chest shape add-ons**: some outfits switch Angel's or EVE's chest to its *natural* or *squish* shape while they are
   worn. The tool sees that and fits those outfits to that shape (the log says so).
+- **Pasties and other items worn on the bare chest**: tick **Worn without a top** for them (see step 5). Refit them on
+  their own, not together with a top from the same download.
+- **Nipples poke through a top**: with some tops the game keeps the bare chest shape under them (seen with
+  "Shoulder twist top" on Angel: the normal refit was up to 1 cm inside the bare chest). Refit that top again with
+  **Worn without a top** ticked.
+- **Colour versions**: if a download has several colours of the same clothes, the tool refits the one installed in your
+  game (or the first one, and says so). The game only shows one of them at a time anyway.
+- **Cloth physics**: parts with cloth physics (some skirts, coats) are left unchanged, because changing them can crash
+  the game. They may clip a little on another body.
 - **Layered outfits**: when something is worn over a piece, the game squashes that piece toward the body. The tool fits
   that squashed shape to your body too.
 - **Rig mods that change the breast area** (for example "All the Rigs") and breast physics mods: Hyst says they make
   some clothes clip with these bodies, mostly when V moves. The tool finds such mods in your game and says so in the
-  log; tick **Make clothes move with the body** so tight clothes follow those movements.
+  log; keep **Make clothes move with the body** ticked so tight clothes follow those movements.
 
 ## Please respect the authors
 
@@ -323,6 +337,22 @@ Fit details (1.8):
 - **Feet**: the body shape has flat feet; shoes for raised feet overlap them by design (Casual Pt.5 shoes: 5,086
   vertices up to 25 mm inside the vanilla body in the original). Below 35 cm, vertices that were inside the source
   body stay where the field puts them (a refit moves the feet 1-4 mm); before, 4,990 of them were pushed out.
+
+Fit details (1.9):
+- **Worn without a top** (`--no-top`): with nothing over the chest the game shows the body with the character
+  creator's *Big* chest morph (`t0_000_pwa_base__full.morphtarget`, `breast_big`). Measured: full body + that morph is
+  identical (0.0 mm) to Angel's `femv_boobs_natural` and EVE's `femv_boobs_nipple` mesh, so the option fits to those
+  (`bodies.json` `uncovered`), unless the mesh carries a chest shape tag itself. Not saved: it's for single items.
+- **Make clothes move with the body** is on by default (new settings key, so the old saved default doesn't stick).
+- The refit's name and the install list ignore the Nexus `-<mod id>-<version>-<time>` tail of a download's name, so an
+  updated outfit replaces its old refit.
+- Archives of one download that share mesh paths are alternatives (colour / FOMOD options): one is refit, the installed
+  one first, else the first by name (archives load by name; the first loaded wins).
+- Meshes that are the body itself (`bodies.json` `meshes` and chest shapes) are never refit, even when bundled.
+- Meshes with `meshMeshParamCloth` (cloth physics) are copied unchanged: the wiki notes a changed cloth mesh crashes
+  the game, even for a refit.
+- REDmod installs (`mods\<name>\archives`) count as installed.
+- 'Worn without a top' with a chest shape tag the target body lacks falls back to the uncovered chest.
 
 Robustness (1.8):
 - A mesh that fails in the refit step (an exception, too little memory) is skipped and listed; the rest of the outfit

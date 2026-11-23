@@ -25,7 +25,7 @@ if (
     except OSError:
         DATA = _OLD_DATA
 
-VERSION = "1.8"
+VERSION = "1.9"
 
 
 def documents_dir():
@@ -850,8 +850,18 @@ def shown_name(path):
     return re.sub(r"\.(zip|7z|rar|archive)$", "", n, flags=re.I)
 
 
+NEXUS_TAIL = re.compile(
+    r"-\d+(?:-[0-9a-z]+)*-\d{9,11}$", re.I
+)  # Nexus download: Name-<mod id>-<version>-<time>
+
+
+def outfit_key(shown):
+    """The outfit's name without the Nexus mod id / version / time, so an updated outfit replaces the old refit."""
+    return NEXUS_TAIL.sub("", shown or "") or shown
+
+
 def outfit_name(path):
-    n = re.sub(r"\W+", "_", shown_name(path)).strip("_") or "outfit"
+    n = re.sub(r"\W+", "_", outfit_key(shown_name(path))).strip("_") or "outfit"
     # cut long names, with a short checksum so two downloads with the same start (main + optional file) differ
     return (
         n if len(n) <= 60 else n[:52] + "_" + hashlib.sha1(n.encode()).hexdigest()[:7]
@@ -898,10 +908,55 @@ def unpack(path, dest, only=None):
     return dest
 
 
-def prepare_input(path, dest, log, src="vanilla"):
+def pick_variants(arcs, game, log):
+    """Archives holding the same meshes are alternatives (colour / FOMOD options); the game loads only one of them.
+    -> arcs with one per such group: the one in the game (the first in load order if several), else the first by
+    name. Refitting every colour is pointless: their refits replace the same files, so again only one would show."""
+
+    def mesh_ids(a):
+        try:
+            r = rdar.Rdar(a)
+            ids = {rdar.fnv(n) for n in r.names if n.lower().endswith(".mesh")}
+            return ids or r.hashes()  # no name list (old packing): every file
+        except Exception:
+            return set()
+
+    ids = {a: mesh_ids(a) for a in arcs}
+    groups = []
+    for a in arcs:
+        g = next((g for g in groups if any(ids[a] & ids[b] for b in g)), None)
+        g.append(a) if g else groups.append([a])
+    if all(len(g) == 1 for g in groups):
+        return arcs
+    have = archives_in_game(game) if game else set()
+    name = lambda a: os.path.basename(a).lower()
+    keep = set()
+    for g in groups:
+        inst = [a for a in g if name(a) in have]
+        pick = min(
+            inst or g, key=name
+        )  # archives load by name; the first one loaded wins
+        keep.add(pick)
+        if len(g) > 1:
+            log(
+                "This download has %d versions of the same clothes (%s); the game shows only one. Refitting %s, %s."
+                % (
+                    len(g),
+                    ", ".join(sorted(os.path.basename(a) for a in g)),
+                    os.path.basename(pick),
+                    "the one in your game"
+                    if inst
+                    else "the first one. For another one, install that one first, or pick its .archive file",
+                )
+            )
+    return [a for a in arcs if a in keep]
+
+
+def prepare_input(path, dest, log, src="vanilla", game=None):
     """zip/7z/rar/folder/.archive -> list of the .archive files to refit (copied/extracted under dest).
     Downloads with several body versions (Vanilla / EBB / Angel folders with the same files) -> the one for src
-    (the body the outfit is made for), else the vanilla one. Warns when the chosen files look made for another body."""
+    (the body the outfit is made for), else the vanilla one. Warns when the chosen files look made for another body.
+    Several colour versions of the same clothes -> one (pick_variants)."""
     os.makedirs(dest, exist_ok=True)
     if not os.path.isdir(path) and path.lower().endswith(".archive"):
         shutil.copy(path, dest)
@@ -911,7 +966,7 @@ def prepare_input(path, dest, log, src="vanilla"):
     arcs = sorted(glob.glob(os.path.join(root, "**", "*.archive"), recursive=True))
     if not arcs:
         raise ToolError("No .archive file found in %s." % os.path.basename(path))
-    chosen = choose_archives(arcs, root, log, src)
+    chosen = pick_variants(choose_archives(arcs, root, log, src), game, log)
     # the chosen files' own paths say more than the download's name, so they are looked at first
     variant_warning(
         [os.path.relpath(a, root) for a in chosen] + [shown_name(path)], log, src
@@ -1149,8 +1204,8 @@ def install(files, game, log, outfit=""):
             e
             for e in lst
             if e.get("kind") == "refit"
-            and e.get("outfit") == outfit
             and outfit
+            and outfit_key(e.get("outfit")) == outfit_key(outfit)
             and _key(e) != k
             and (
                 e["file"].startswith("!")
@@ -1166,10 +1221,12 @@ def install(files, game, log, outfit=""):
 
 
 def archives_in_game(game):
-    r"""Lower-case names of every .archive under archive\pc\mod, subfolders included (Vortex / MO2 installs)."""
+    r"""Lower-case names of every .archive under archive\pc\mod, subfolders included (Vortex / MO2 installs), and
+    under mods\<name>\archives (REDmod installs)."""
     names = set()
-    for dp, _, fs in os.walk(mod_dir(game)):
-        names.update(f.lower() for f in fs if f.lower().endswith(".archive"))
+    for top in (mod_dir(game), os.path.join(game, "mods")):
+        for dp, _, fs in os.walk(top):
+            names.update(f.lower() for f in fs if f.lower().endswith(".archive"))
     return names
 
 
@@ -1377,6 +1434,7 @@ def run_batch(
     src="vanilla",
     replace_own=False,
     copy_moves=False,
+    no_top=False,
 ):
     """Refit every input from body src (the body the outfits are made for) to body tag. -> list of (input, output
     archive or None, message, original missing).
@@ -1384,7 +1442,8 @@ def run_batch(
     body_files: {body tag: body file the user picked}.
     cancel: a threading.Event; once set, nothing more is installed and no further outfit is started.
     replace_own: also refit parts the outfit already ships a version for body tag of, replacing that version.
-    copy_moves: clothing close to the body gets the body's movement (skin weights), see refit.copy_weights."""
+    copy_moves: clothing close to the body gets the body's movement (skin weights), see refit.copy_weights.
+    no_top: the outfits are worn with nothing over the chest: fit to the body's uncovered chest."""
     import refit
 
     cancel = cancel or threading.Event()
@@ -1409,7 +1468,7 @@ def run_batch(
         log("=== %s ===" % os.path.basename(inp))
         work = tempfile.mkdtemp(prefix="job_", dir=_work_root())
         try:
-            arcs = prepare_input(inp, os.path.join(work, "in"), log, src)
+            arcs = prepare_input(inp, os.path.join(work, "in"), log, src, game)
             res = refit.refit_mod(
                 arcs,
                 name,
@@ -1428,6 +1487,7 @@ def run_batch(
                 else arcs,
                 replace_own,
                 copy_moves,
+                no_top,
             )
             missing = bool(res) and original_missing(arcs, game)
             if res and do_install:
