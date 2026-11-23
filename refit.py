@@ -26,7 +26,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 import rdar
-from core import ToolError, body_name, run, xl_name
+from core import ToolError, bodies, body_name, run, shape_cage, xl_name
 
 HELPER = re.compile(
     r"(save_material|material_mesh|_materials?\.mesh$|_shadow\.mesh$|[\\/_]props?[\\/_])",
@@ -64,7 +64,9 @@ def acc_view(d, j, bin_off, ai):
 
 def read(d, j, bin_off, ai):
     start, stride, cnt, n = acc_view(d, j, bin_off, ai)
-    raw = np.frombuffer(bytes(d), dtype=np.uint8)
+    raw = np.frombuffer(
+        d, dtype=np.uint8
+    )  # a view: no copy of the whole file per accessor
     idx = start + np.arange(cnt)[:, None] * stride + np.arange(n * 4)[None, :]
     return (
         raw[idx].reshape(cnt, n * 4).view(np.float32).reshape(cnt, n).astype(np.float64)
@@ -73,21 +75,34 @@ def read(d, j, bin_off, ai):
 
 def write(d, j, bin_off, ai, arr):
     start, stride, cnt, n = acc_view(d, j, bin_off, ai)
-    f = arr.astype(np.float32)
-    for i in range(cnt):
-        d[start + i * stride : start + i * stride + 4 * n] = f[i].tobytes()
+    f = np.ascontiguousarray(arr, dtype=np.float32)
+    idx = start + np.arange(cnt)[:, None] * stride + np.arange(n * 4)[None, :]
+    np.frombuffer(d, np.uint8)[idx] = f.view(np.uint8).reshape(cnt, n * 4)
     a = j["accessors"][ai]
     a["min"], a["max"] = f.min(0).tolist(), f.max(0).tolist()
+
+
+def lod1(spec):
+    """(glb bytes, json, bin offset, [LOD 1 meshes]) of one body glb. spec 'file.glb|hide=0,1,2' leaves out those
+    submeshes (a chest shape add-on replaces them, as the body mod's .xl does with hide: [0, 1, 2])."""
+    path, _, opt = spec.partition("|")
+    hide = {int(x) for x in opt[5:].split(",")} if opt.startswith("hide=") else set()
+    d, j, b = load(path)
+    ms = []
+    for m in j["meshes"]:
+        n = m.get("name") or "LOD_1"
+        k = re.match(r"submesh_(\d+)", n)
+        if "LOD_1" in n and not (k and int(k.group(1)) in hide):
+            ms.append(m)
+    return d, j, b, ms
 
 
 def body_points(paths):
     """LOD 1 positions + normals of a body shape (one glb or several joined with ';')."""
     pts, nrm = [], []
     for p in paths.split(";"):
-        d, j, b = load(p)
-        for m in j["meshes"]:
-            if "LOD_1" not in (m.get("name") or "LOD_1"):
-                continue
+        d, j, b, ms = lod1(p)
+        for m in ms:
             for pr in m["primitives"]:
                 pts.append(read(d, j, b, pr["attributes"]["POSITION"]))
                 if "NORMAL" in pr["attributes"]:
@@ -96,6 +111,12 @@ def body_points(paths):
 
 
 _SHAPE = {}
+
+
+def forget_bodies():
+    """Empty every cache that holds body shapes (a body was read again from a changed body file)."""
+    for c in (_SHAPE, _FIELD, _SURF, _BSKIN, _TREES, _TIPS):
+        c.clear()
 
 
 def shape(paths):
@@ -158,7 +179,51 @@ def move(P, src, tgt, off=0.004):
             break
         Q[near[low]] = q[low] + n[low] * off
         bad[near[low]] = True
+    # nipples: Angel / EVE show nipple meshes that stick out of the body shape, also under clothes. Hyst's own
+    # vanilla refits sit 5-9 mm over the breast tips (elsewhere down to 2 mm); at 4 mm the nipples poked through
+    # (reported). So near the tips the floor rises by the body's 'nipple_room', fading out over 3 cm.
+    extra = nipple_room(tgt)
+    if extra:
+        tips, r = breast_tips(tgt), 0.03
+        near = np.where(np.linalg.norm(Q[:, None] - tips[None], axis=2).min(1) < r + 0.02)[0]
+        if len(near):
+            h, q, n = skin_height(Q[near], tgt)
+            dq = np.linalg.norm(q[:, None] - tips[None], axis=2).min(1)
+            want = off + extra * np.clip(1 - (dq / r) ** 2, 0, 1)
+            low = (h < want) & (h > -0.015)
+            Q[near[low]] = q[low] + n[low] * want[low, None]
+            bad[near[low]] = True
+    # shoes: the body shape has flat feet, but a shoe for raised feet (heels) has its sole and inside where the flat
+    # foot is. Vertices that were already inside the source body there stay where the field put them (the feet are
+    # the same on every body: a refit moves them 1-4 mm). ponytail: below 35 cm, any depth.
+    low = np.where(P[:, 1] < FEET_Y)[0]
+    if len(low):
+        was = low[skin_height(P[low], src)[0] < 0]
+        Q[was] = (P + (disp[nb] * w[..., None]).sum(1))[was]
+        bad[was] = False
     return Q, int(bad.sum())
+
+
+FEET_Y = 0.35  # m above the ground: up to here, a different feet state (flat / raised) is normal
+_TIPS = {}
+
+
+def breast_tips(tgt):
+    """The two breast tips of a body shape: its most forward chest point on each side (-z is forward)."""
+    if tgt not in _TIPS:
+        B = body_points(tgt)[0]
+        tips = []
+        for side in (1, -1):
+            s = (B[:, 1] > 1.25) & (B[:, 1] < 1.45) & (B[:, 0] * side > 0.03)
+            tips.append(B[s][np.argmin(B[s][:, 2])])
+        _TIPS[tgt] = np.array(tips)
+    return _TIPS[tgt]
+
+
+def nipple_room(tgt):
+    """Extra room over the breast tips (m) for the body whose shape tgt is (bodies.json 'nipple_room', mm)."""
+    key = os.path.basename(os.path.dirname(tgt.split(";")[0].split("|")[0]))
+    return bodies()["bodies"].get(key, {}).get("nipple_room", 0) / 1000.0
 
 
 def layer_push(Q, inner, tgt, gap=0.001, reach=0.006):
@@ -244,10 +309,8 @@ def surface(paths):
     if paths not in _SURF:
         Ps, Ns, Fs, o = [], [], [], 0
         for p in paths.split(";"):
-            d, j, b = load(p)
-            for m in j["meshes"]:
-                if "LOD_1" not in (m.get("name") or "LOD_1"):
-                    continue
+            d, j, b, ms = lod1(p)
+            for m in ms:
                 for pr in m["primitives"]:
                     P = read(d, j, b, pr["attributes"]["POSITION"])
                     Ps.append(P)
@@ -265,7 +328,7 @@ def read_index(d, j, b, ai):
     bv = j["bufferViews"][a["bufferView"]]
     dt = {5121: "<u1", 5123: "<u2", 5125: "<u4"}[a["componentType"]]
     start = b + bv.get("byteOffset", 0) + a.get("byteOffset", 0)
-    return np.frombuffer(bytes(d), dt, a["count"], start).astype(np.int64)
+    return np.frombuffer(d, dt, a["count"], start).astype(np.int64)
 
 
 def skin_height(X, tgt, k=24, faces=False):
@@ -336,7 +399,7 @@ def _acc_layout(d, j, b, ai):
 def read_vals(d, j, b, ai):
     """Any accessor as float64 (normalized integers as 0-1, joint indices as they are)."""
     a, dt, n, idx = _acc_layout(d, j, b, ai)
-    raw = np.frombuffer(bytes(d), np.uint8)
+    raw = np.frombuffer(d, np.uint8)
     X = (
         raw[idx]
         .reshape(a["count"], -1)
@@ -378,7 +441,7 @@ def body_skin(paths):
     if paths not in _BSKIN:
         names, idx, Js, Ws, parent = [], {}, [], [], {}
         for p in paths.split(";"):
-            d, j, b = load(p)
+            d, j, b, ms = lod1(p)
             local = []
             for ni in j["skins"][0]["joints"] if j.get("skins") else []:
                 nm = j["nodes"][ni].get("name")
@@ -390,9 +453,7 @@ def body_skin(paths):
                 for c in nd.get("children", []):
                     parent.setdefault(j["nodes"][c].get("name"), nd.get("name"))
             local = np.array(local or [0])
-            for m in j["meshes"]:
-                if "LOD_1" not in (m.get("name") or "LOD_1"):
-                    continue
+            for m in ms:
                 for pr in m["primitives"]:
                     sk = prim_skin(d, j, b, pr)
                     n = j["accessors"][pr["attributes"]["POSITION"]]["count"]
@@ -505,16 +566,31 @@ def lod_of(name):
 
 def refit_glb(gar, out, src, tgt, inner=None, weights=False):
     """refit_parts() applied to a WolvenKit glb export. Only POSITION bytes change (and with weights=True the skin
-    weights near the body, copy_weights): indices, UVs, normals and morph targets stay identical.
+    weights near the body, copy_weights): indices, UVs and normals stay identical. The GarmentSupport morph (the
+    squashed shape the game shows while another layer is worn over the garment) is refit too: its delta is made
+    again from the refit squashed shape, else it would squash the garment into the target body.
     -> (vertices, pushed out of the skin, lifted over inner layers, [(LOD, new positions)], vertices that got the
-    body's weights)."""
+    body's weights, primitives whose garment support was refit)."""
     d, j, b = load(gar)
     prims = [(lod_of(m.get("name")), pr) for m in j["meshes"] for pr in m["primitives"]]
+    gsk = {  # primitive id -> index of its GarmentSupport morph target
+        id(pr): m["extras"]["targetNames"].index("GarmentSupport")
+        for m in j["meshes"]
+        if "GarmentSupport" in (m.get("extras") or {}).get("targetNames", [])
+        for pr in m["primitives"]
+        if pr.get("targets")
+    }
     acc = [(lod, pr["attributes"]["POSITION"]) for lod, pr in prims]
     parts = [(lod, read(d, j, b, ai)) for lod, ai in acc]
     Qs, inside, lifted = refit_parts(parts, src, tgt, inner)
-    copied = 0
-    for (_, ai), (_, pr), Q in zip(acc, prims, Qs):
+    copied = gs = 0
+    for (_, ai), (_, pr), (_, P), Q in zip(acc, prims, parts, Qs):
+        if id(pr) in gsk and gsk[id(pr)] < len(pr["targets"]):
+            ti = pr["targets"][gsk[id(pr)]].get("POSITION")
+            if ti is not None:
+                D = read(d, j, b, ti)
+                write(d, j, b, ti, move(P + D, src, tgt)[0] - Q)
+                gs += 1
         write(d, j, b, ai, Q)
         if weights:
             copied += copy_weights(d, j, b, pr, Q, tgt)
@@ -529,6 +605,7 @@ def refit_glb(gar, out, src, tgt, inner=None, weights=False):
         lifted,
         [(lod, Q) for (lod, _), Q in zip(parts, Qs)],
         copied,
+        gs,
     )
 
 
@@ -1166,6 +1243,62 @@ def inner_layers(slot, worn):
 # ---------------- one outfit ----------------
 
 
+SHAPE_TAG = re.compile(r"\bhyst_boobs_[a-z]+\b")
+MESH_PATH = re.compile(r"\*?[A-Za-z0-9_\\/.\-{}]+\.mesh")
+ENT_PATH = re.compile(r"\*?[A-Za-z0-9_\\/.\-{}]+\.ent\b")
+
+
+def shapes_by_mesh(js):
+    """{mesh path as written in the outfit (lower case, {body} kept): chest shape tag} from the serialized .app /
+    .ent JSON in folder js: every appearance with a visual tag like hyst_boobs_squish makes the body mod show that
+    chest shape while it is worn (the body's .xl hides the normal chest, shows the add-on). The appearance's meshes
+    are its own components and those of the mesh .ent files it names as parts."""
+    ents, out = {}, {}
+    files = glob.glob(os.path.join(js, "**", "*.json"), recursive=True)
+    for f in files:  # mesh .ent (relative path as the game writes it) -> its mesh paths
+        if f.lower().endswith(".ent.json"):
+            rel = os.path.relpath(f, js)[: -len(".json")].lower()
+            txt = open(f, encoding="utf-8", errors="ignore").read().replace("\\\\", "\\")
+            ents[rel] = MESH_PATH.findall(txt)
+
+    def walk(o):
+        if isinstance(o, dict):
+            if "visualTags" in o:
+                tags = SHAPE_TAG.findall(json.dumps(o["visualTags"]))
+                if tags:
+                    txt = json.dumps(o).replace("\\\\", "\\")
+                    found = MESH_PATH.findall(txt)
+                    for e in ENT_PATH.findall(txt):
+                        found += ents.get(e.lstrip("*").replace("/", "\\").lower(), [])
+                    for m in found:
+                        out.setdefault(norm_mesh(m), tags[0])
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    for f in files:
+        try:
+            walk(json.load(open(f, encoding="utf-8", errors="ignore")))
+        except ValueError:
+            pass
+    return out
+
+
+def norm_mesh(m):
+    return m.lstrip("*").replace("/", "\\").lower().replace("{gender}", "w")
+
+
+def mesh_shape(tags, rel, body_xl):
+    """The chest shape tag for mesh rel (as in the archive) of body body_xl's family, or None."""
+    rel = rel.lower()
+    for k, tag in tags.items():
+        if k == rel or k.replace("{body}", body_xl) == rel:
+            return tag
+    return None
+
+
 def refit_mod(
     arcs,
     name,
@@ -1249,6 +1382,7 @@ def refit_mod(
             dyn.add(
                 m.group().replace("\\\\", "\\").lstrip("*").replace("/", "\\").lower()
             )
+    shape_tags = shapes_by_mesh(js)
     jobs, covered, skipped = [], set(), []  # jobs: (source rel path, target rel path)
     for pat in sorted(dyn):
         pat = pat.replace("{gender}", "w")  # ArchiveXL: female V -> "w"
@@ -1324,14 +1458,45 @@ def refit_mod(
             )
     worn = []  # (slot, [(LOD, refit positions)]) of the refit garments with a layer slot
     done, glbs = [], {}
+
+    def as_is(s, t, why):
+        """Leave mesh s unchanged. In a {body} family the target body still needs its own file (else ArchiveXL finds
+        nothing for that body and the part is invisible): an unchanged copy."""
+        if s == t:
+            skipped.append((s, why))
+            return
+        tdir = os.path.join(pack, os.path.dirname(t))
+        os.makedirs(tdir, exist_ok=True)
+        shutil.copy(meshes[s], os.path.join(pack, t))
+        done.append((s, t))
+        log("  %s: copied unchanged (%s)" % (os.path.basename(t), why))
+
     for n, (s, t) in enumerate(jobs):
         progress(0.8 * n / len(jobs))
         own = None
+        tag = mesh_shape(shape_tags, s, sx) or mesh_shape(shape_tags, t, tx)
+        c_src = shape_cage(cages[src_body], src_body, tag)
+        c_tgt = shape_cage(cages[tgt], tgt, tag)
+        if tag and (c_src != cages[src_body] or c_tgt != cages[tgt]):
+            log(
+                "  %s: the outfit switches the chest to its '%s' shape; fit to that shape%s"
+                % (
+                    os.path.basename(t),
+                    tag.replace("hyst_boobs_", ""),
+                    ""
+                    if c_tgt != cages[tgt]
+                    else " of %s (%s has none)" % (body_name(src_body), body_name(tgt)),
+                )
+            )
         try:
             run([wk, "export", meshes[s], "-o", glbd, "-gp", game], game)
             g = os.path.join(glbd, os.path.splitext(os.path.basename(s))[0] + ".glb")
             pts = glb_points(g)
-        except RuntimeError:
+        except (
+            ToolError
+        ):  # stopped (window closed) or timed out: no skipping, the outfit stops
+            raise
+        except Exception:  # WolvenKit failed, or wrote no / an unreadable glb
             try:  # e.g. game 1.6-era meshes: the own reader needs only the vertex data
                 own = OwnMesh(open(meshes[s], "rb").read())
                 pts = to_glb(own.positions())
@@ -1339,10 +1504,8 @@ def refit_mod(
                 skipped.append((s, "WolvenKit can't read this mesh"))
                 continue
         stem = os.path.splitext(os.path.basename(s))[0]
-        if not BODY_SUFFIX.search(stem) and far_from_body(
-            pts, (cages[src_body], cages[tgt])
-        ):
-            skipped.append((s, "not worn on the body (same on every body)"))
+        if not BODY_SUFFIX.search(stem) and far_from_body(pts, (c_src, c_tgt)):
+            as_is(s, t, "not worn on the body (same on every body)")
             continue
         tdir = os.path.dirname(t)
         os.makedirs(os.path.join(raw, tdir), exist_ok=True)
@@ -1352,7 +1515,7 @@ def refit_mod(
         if own:  # split by render chunk: each chunk's LOD meets the same LOD of the inner layers
             cut = np.cumsum([n for _, _, n in own.spans])[:-1]
             parts = list(zip(own.lods, np.split(pts, cut)))
-            Qs, pushed, lifted = refit_parts(parts, cages[src_body], cages[tgt], inner)
+            Qs, pushed, lifted = refit_parts(parts, c_src, c_tgt, inner)
             try:
                 data = own_refit(own, from_glb_space(np.vstack(Qs)))
             except Exception as e:
@@ -1380,10 +1543,18 @@ def refit_mod(
         )  # own copy: glbd is keyed by basename
         os.makedirs(os.path.dirname(g2), exist_ok=True)
         shutil.copy(g, g2)
+        try:
+            nv, pushed, lifted, parts, copied, gs = refit_glb(
+                g, tglb, c_src, c_tgt, inner, copy_moves
+            )
+        except Exception as e:  # one odd mesh (or too little memory for it) never costs the rest of the outfit
+            skipped.append(
+                (s, "could not be refit (%s)" % (str(e) or type(e).__name__)[:200])
+            )
+            if os.path.exists(tglb):
+                os.remove(tglb)
+            continue
         glbs[t] = (g2, tglb)
-        nv, pushed, lifted, parts, copied = refit_glb(
-            g, tglb, cages[src_body], cages[tgt], inner, copy_moves
-        )
         log(
             "  %s: %d vertices moved, %d pushed out of the skin%s%s"
             % (
@@ -1391,7 +1562,8 @@ def refit_mod(
                 nv,
                 pushed,
                 lift(lifted),
-                ", %d now move with the body" % copied if copied else "",
+                (", %d now move with the body" % copied if copied else "")
+                + (", its squashed shape (garment support) refit too" if gs else ""),
             )
         )
         shutil.copy(meshes[s], os.path.join(pack, t))
@@ -1423,7 +1595,11 @@ def refit_mod(
     for s, why in skipped:
         log("  skipped %s: %s" % (os.path.basename(s), why))
     if not done:
-        if any("WolvenKit" in w or "rebuilt" in w or "safely" in w for _, w in skipped):
+        if any(
+            k in w
+            for _, w in skipped
+            for k in ("WolvenKit", "rebuilt", "safely", "could not be refit")
+        ):
             raise ToolError("none of the meshes could be refit (see the list above).")
         log("Nothing needed a refit.")
         return None
@@ -1433,7 +1609,9 @@ def refit_mod(
     tmp = os.path.join(work, "packout")
     os.makedirs(tmp, exist_ok=True)
     run([wk, "pack", pack, "-o", tmp], game, ok="Finished packing")
-    arch = glob.glob(os.path.join(tmp, "*.archive"))[0]
+    arch = (glob.glob(os.path.join(tmp, "*.archive")) or [None])[0]
+    if not arch:
+        raise ToolError("WolvenKit could not pack the refit into an .archive file.")
     progress(0.95)
     bad = buffer_gate(arch, {t: meshes[s] for s, t in done})
     if bad:  # never hand out an archive with broken buffers
@@ -1444,7 +1622,10 @@ def refit_mod(
     final = os.path.join(
         out, ("!!!" if static else "") + tgt.capitalize() + "Refit_" + name + ".archive"
     )
-    shutil.move(arch, final)
+    shutil.move(
+        arch, final + ".part"
+    )  # across drives this is a copy: the final name only when complete
+    os.replace(final + ".part", final)
     log(
         "Done: %s (%d mesh(es) refit%s)"
         % (

@@ -3,7 +3,7 @@ text file with that record, the settings and a check of the game folder. No file
 name / profile path is replaced everywhere. Nothing here may crash the window: every check that fails writes its
 reason into the report instead."""
 
-import collections, fnmatch, os, platform, re, subprocess, sys, threading, time, traceback, zipfile
+import collections, fnmatch, glob, os, platform, re, shutil, subprocess, sys, tempfile, threading, time, traceback, zipfile
 
 import core
 
@@ -159,18 +159,25 @@ def input_files(path):
         names = [i.filename for i in zipfile.ZipFile(path).infolist() if not i.is_dir()]
     elif low.endswith((".7z", ".rar")):
         z = core.find_7z()
-        if not z:
-            raise core.ToolError("7-Zip is not installed, cannot look inside")
-        out = core.run([z, "l", "-slt", "-ba", path])
-        names, cur = [], {}
-        for line in out.splitlines() + [""]:
-            if not line.strip():
-                if cur.get("Path") and "D" not in cur.get("Attributes", ""):
-                    names.append(cur["Path"])
-                cur = {}
-            elif " = " in line:
-                k, _, v = line.partition(" = ")
-                cur[k.strip()] = v
+        if z:
+            out = core.run([z, "l", "-slt", "-ba", path])
+            names, cur = [], {}
+            for line in out.splitlines() + [""]:
+                if not line.strip():
+                    if cur.get("Path") and "D" not in cur.get("Attributes", ""):
+                        names.append(cur["Path"])
+                    cur = {}
+                elif " = " in line:
+                    k, _, v = line.partition(" = ")
+                    cur[k.strip()] = v
+        elif core.find_tar():
+            names = [
+                n
+                for n in core.run([core.find_tar(), "-t", "-f", path]).splitlines()
+                if n.strip() and not n.endswith(("/", "\\"))
+            ]
+        else:
+            raise core.ToolError("no 7-Zip and no Windows tar, cannot look inside")
     else:
         raise core.ToolError("not a zip, 7z, rar, folder or .archive")
     return root, [os.path.join(root, os.path.normpath(n)) for n in names]
@@ -222,6 +229,15 @@ def _where(found, name):
     return ("present: " + ", ".join(hits)) if hits else "MISSING"
 
 
+def _is_body(path):
+    """Does this .archive hold the female body mesh (a body mod), not just a body-like name (refits, bodysuits)?
+    -> True / False / None (can't be read: broken or cut off, worth showing)."""
+    try:
+        return core.rdar.fnv(core.bodies()["meshes"][0]) in core.rdar.Rdar(path).hashes()
+    except Exception:
+        return None
+
+
 def check_game(game, out_dir, outfits, refits, lines):
     """Append the game folder check to lines. outfits: inputs in the list; refits: [(input, output archive)]."""
     if not core.is_game_dir(game):
@@ -256,11 +272,13 @@ def check_game(game, out_dir, outfits, refits, lines):
     ]
     bodies = sorted(
         {
-            "%s (%s)" % (r, core.body_name(t))
+            "%s (%s%s)" % (r, core.body_name(t), "" if ok else ", could not be read")
             for n, rels in found.items()
             for t, p in pats
             if fnmatch.fnmatch(n, p.lower())
             for r in rels
+            for ok in [_is_body(os.path.join(core.mod_dir(game), r))]
+            if ok is not False
         }
     )
     lines.append(
@@ -337,6 +355,189 @@ def check_game(game, out_dir, outfits, refits, lines):
         lines.append("  refit in the output folder: %s" % ("; ".join(mine) or "none"))
 
 
+# ---------------- this PC ----------------
+
+
+def _quiet(args, timeout=30):
+    """Output of a small Windows command, or the reason it failed (never raises, never waits forever)."""
+    try:
+        r = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout,
+            env=dict(os.environ, **core._ENV),
+            creationflags=0x08000000,
+            stdin=subprocess.DEVNULL,
+        )
+        return (r.stdout + r.stderr).strip() or "exit code %d" % r.returncode
+    except Exception as e:
+        return "failed: %s" % (e,)
+
+
+def _writable(d):
+    """Can the tool create a file in folder d (made if missing)? Only for the tool's own folders."""
+    try:
+        os.makedirs(d, exist_ok=True)
+        with tempfile.TemporaryFile(dir=d):
+            pass
+        return "yes"
+    except OSError as e:
+        return "NO (%s)" % (core.explain(e) or e)
+
+
+def _free(p):
+    while p and not os.path.exists(p):
+        p = os.path.dirname(p) if os.path.dirname(p) != p else ""
+    try:
+        return "%.1f GB free" % (shutil.disk_usage(p).free / 1e9) if p else "unknown"
+    except OSError:
+        return "unknown"
+
+
+def pc_lines(game, out, L):
+    """What on this PC can stop the tool: Windows, folders, antivirus, the helper programs, the game's store and mod
+    managers. Nothing personal (no PC name, no other files)."""
+    import ctypes, locale, winreg
+
+    k32 = ctypes.windll.kernel32
+    L.append(
+        "Windows: %s, %s; language %s, code page %d"
+        % (
+            platform.machine(),
+            platform.version(),
+            locale.windows_locale.get(k32.GetUserDefaultUILanguage(), "?"),
+            k32.GetACP(),
+        )
+    )
+    for name, d in (("Data folder", core.DATA), ("Output folder", out)):
+        L.append(
+            "%s: writable %s, %s, path %d characters%s"
+            % (
+                name,
+                _writable(d) if d else "-",
+                _free(d),
+                len(d or ""),
+                ", in OneDrive" if "onedrive" in (d or "").lower() else "",
+            )
+        )
+    if game:
+        low = game.lower()
+        L.append(
+            "Game drive: %s%s"
+            % (
+                _free(game),
+                ", in a protected folder (%s)"
+                % ("Program Files" if "program files" in low else "WindowsApps")
+                if "program files" in low or "windowsapps" in low
+                else "",
+            )
+        )
+        L.append(
+            "Game store files: %s"
+            % (
+                ", ".join(
+                    os.path.basename(p)
+                    for p in sorted(
+                        glob.glob(os.path.join(game, "bin", "x64", "GameServices*.dll"))
+                    )
+                )
+                or "none"
+            )
+            + (", Xbox app folder" if "xboxgames" in low else "")
+        )
+        L.append(
+            "Vortex: %s"
+            % (
+                "manages archive\\pc\\mod"
+                if glob.glob(
+                    os.path.join(core.mod_dir(game), "__folder_managed_by_vortex")
+                )
+                or glob.glob(os.path.join(game, "vortex.deployment*.json"))
+                else "no sign of it"
+            )
+        )
+        oo = os.path.join(game, "bin", "x64", "oo2ext_7_win64.dll")
+        cp = os.path.join(os.environ.get("LOCALAPPDATA", ""), "oo2ext_7_win64.dll")
+        L.append(
+            "Oodle DLL: in the game %s, copy for WolvenKit %s"
+            % (
+                "present" if os.path.isfile(oo) else "MISSING",
+                "present"
+                if os.path.isfile(cp)
+                and os.path.isfile(oo)
+                and os.path.getsize(cp) == os.path.getsize(oo)
+                else "missing or different",
+            )
+        )
+    L.append(
+        "Mod Organizer 2: %s"
+        % (
+            "installed (its mods are not in the game folder)"
+            if os.path.isdir(
+                os.path.join(os.environ.get("LOCALAPPDATA", ""), "ModOrganizer")
+            )
+            else "no sign of it"
+        )
+    )
+    running = _quiet(["tasklist", "/FI", "IMAGENAME eq Cyberpunk2077.exe", "/NH"], 15)
+    L.append(
+        "Game running now: %s" % ("yes" if "Cyberpunk2077.exe" in running else "no")
+    )
+    L.append(
+        "Unpacking .7z / .rar: %s"
+        % (
+            "7-Zip " + core.find_7z()
+            if core.find_7z()
+            else "Windows tar (no 7-Zip)"
+            if core.find_tar()
+            else "NOT POSSIBLE (no 7-Zip, no Windows tar)"
+        )
+    )
+    wk = core.wk_exe()
+    L.append(
+        "WolvenKit start test: %s"
+        % (
+            _quiet([wk, "--version"], 60).replace("\n", " | ")[:600]
+            if os.path.isfile(wk)
+            else "not downloaded yet"
+        )
+    )
+    av = _quiet(
+        [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            "(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct).displayName",
+        ],
+        30,
+    )
+    L.append(
+        "Antivirus: %s"
+        % ", ".join(l.strip() for l in av.splitlines() if l.strip())[:300]
+    )
+    sac = core._reg(
+        winreg.HKEY_LOCAL_MACHINE,
+        r"SYSTEM\CurrentControlSet\Control\CI\Policy",
+        "VerifiedAndReputablePolicyState",
+    )
+    L.append(
+        "Smart App Control: %s"
+        % {
+            0: "off",
+            1: "ON (can block unsigned programs like this tool)",
+            2: "evaluation",
+        }.get(sac, "not present")
+    )
+    lp = core._reg(
+        winreg.HKEY_LOCAL_MACHINE,
+        r"SYSTEM\CurrentControlSet\Control\FileSystem",
+        "LongPathsEnabled",
+    )
+    L.append("Long paths allowed: %s" % ("yes" if lp == 1 else "no"))
+
+
 # ---------------- the report ----------------
 
 
@@ -373,6 +574,7 @@ def build(session, settings, game, out, outfits, refits):
         )
         L.append("Report made: %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
         L.append("Data folder: %s" % core.DATA)
+        pc_lines(game, out, L)
 
     def setting():
         known = core.bodies()["bodies"]

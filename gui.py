@@ -105,12 +105,13 @@ Steps, in order
    Some outfits already come with their own version for your body (for example a built-in Angel version). The tool leaves those parts alone. If you'd rather have the tool's refit for them too (for example because the built-in version clips), tick 'Replace the outfit's own version for my body'. Uninstall the refit to get the outfit's own version back.
    'Make clothes move with the body': tight clothes then follow the body exactly when V moves, also with rig or breast physics mods (the log tells you if you have such mods). Loose parts like a hanging skirt keep their own movement. Leave it off if you don't use such mods and the clothes look right.
 
-7. Click 'Refit'. The bar and the log below show the progress. The first run takes longer: the tool downloads WolvenKit (about 45 MB) and reads the body shapes once.
+7. Click 'Refit'. The bar and the log below show the progress. The first run takes longer: the tool downloads WolvenKit (about 45 MB) and reads the body shapes once. While it runs, the button says 'Stop': click it to stop; nothing is kept from the outfit it was working on.
 
 8. Done. If you didn't tick Install, click 'Open output folder' and copy the .archive file(s) into <game folder>\\archive\\pc\\mod. The original outfit must be in your game as well; the refit only reshapes it. The log tells you if it is missing.
 
 Undo
-'Uninstall...' lists what this tool put into your game: refits, and original outfits it installed because they were missing. Select what to remove. Or delete the AngelRefit_ / EveRefit_ / VanillaRefit_ file from archive\\pc\\mod yourself.
+'Uninstall...' lists what this tool put into your game: refits, and original outfits it installed because they were missing. Select what to remove. Or delete the AngelRefit_ / EveRefit_ / VanillaRefit_ file from archive\\pc\\mod yourself. If a file was changed since the tool installed it (for example you installed the same mod again with a mod manager), the tool leaves it alone and tells you.
+When you refit an outfit again, for example for the other body, the new refit replaces the tool's older refit of that outfit in your game, so the old one can't win over it.
 
 Good to know
 - Pick the right 'Outfit made for'. If an Angel outfit is refit as if it were vanilla, it gets reshaped twice and won't fit. The log warns you when the outfit's name says another body than the one you picked.
@@ -119,11 +120,22 @@ Good to know
 - If something is skipped (for example glasses or props), the log says so; the rest of the outfit is still refit.
 - Outfits with several layers (for example a top, a shirt and a jacket): the tool keeps each layer 1 mm above the one under it, so the shirt doesn't poke through the jacket. It knows the order from the outfit's own files (when the outfit uses ArchiveXL outfit slots such as TorsoUnder / TorsoMiddle / TorsoOuter). Add the outfit's download, not only its .archive, so the tool can read them.
 - Chest size: Hyst tells you to set V's chest size ('Breast') to 'Big' for Angel. That setting changes how V looks nude; in clothes her chest is the same with every setting, so refits fit all of them.
+- Some outfits switch Angel's or EVE's chest to a different shape while they're worn ('natural' or 'squish', Hyst's shape add-ons). The tool sees that and fits those outfits to that shape; the log says so.
+- Layered outfits: when something is worn over a piece, the game squashes that piece toward the body. The tool fits that squashed shape to your body too.
+- Angel and EVE show nipples also under clothes. Refits leave a little more room over the breast tips so they don't poke through.
 - Hyst says that rig mods which change the breast area (for example "All the Rigs") and breast physics mods make some clothes clip with Angel and EVE, mostly when V moves. The tool tells you in the log if you have such mods; tick 'Make clothes move with the body' so tight clothes follow those movements.
 - 'WolvenKit...' lets you use a WolvenKit you already have instead of downloading it.
 
+Common problems
+- The game folder isn't found: click 'Change...' and pick your 'Cyberpunk 2077' folder. For the Xbox app it's XboxGames\\Cyberpunk 2077\\Content.
+- 'WolvenKit needs .NET 10': install Microsoft's free '.NET Runtime 10' (64-bit / x64) from the link in the message. The tool also finds a .NET 10 that WolvenKit misses because of an old Windows setting, and lists what it found.
+- 'Windows did not let the tool use ...': close the game and anything that might have the file open (a mod manager, an archive tool), then try again. If your game is in a protected folder like Program Files, untick Install and copy the refit yourself.
+- 'WolvenKit does not start': an antivirus may have blocked it. The tool downloads WolvenKit again once by itself; if that doesn't help, allow the folder named in the message in your antivirus.
+- .7z and .rar downloads: Windows 11 opens them by itself. If yours can't, install 7-Zip (free), or unpack the download and add the folder.
+- Mod Organizer 2: your mods are not in the game folder, so the tool can't see your body mod there. Pick the body mod's file with 'Body file...'.
+
 Having a problem?
-Click 'Report Issues' and send the file it makes to the mod author. It lists what you did in the tool, the log, and what the tool finds in your game folder. Your Windows user name is left out, and no file contents are included. You can open the file first to see what's inside.
+Click 'Report Issues' and send the file it makes to the mod author. It lists what you did in the tool, the log, what the tool finds in your game folder, and things on your PC that can get in the way (Windows version, free space, your antivirus' name, whether WolvenKit starts). Your Windows user name and your PC's name are left out, and no file contents are included. You can open the file first to see what's inside.
 """
 
 
@@ -135,6 +147,9 @@ ERROR_LINES = (
     "Not installed",
     "Not copied",
     "The original outfit could not",
+    "could not be installed",
+    "Not removed",
+    "Could not save the settings",
 )
 
 
@@ -155,7 +170,10 @@ class App:
         f = ttk.Frame(root)
         f.pack(fill="x", **pad)
         ttk.Label(f, text="Game folder:").grid(row=0, column=0, sticky="w")
-        self.game = tk.StringVar(value=self.s.get("game") or core.find_game() or "")
+        # a saved folder the game was moved away from is looked for again
+        self.game = tk.StringVar(
+            value=core.game_root(self.s.get("game")) or core.find_game() or ""
+        )
         ttk.Entry(f, textvariable=self.game, state="readonly").grid(
             row=0, column=1, sticky="ew", padx=4
         )
@@ -357,7 +375,10 @@ class App:
             replace_own=self.own.get(),
             copy_moves=self.moves.get(),
         )
-        core.save_settings(self.s)
+        try:
+            core.save_settings(self.s)
+        except OSError as e:  # settings are a convenience: never stop the tool for them
+            self.log("Could not save the settings: %s" % (core.explain(e) or e))
 
     def body_files(self):
         """{body tag: body file the user picked} (plain copy, safe to hand to the worker)."""
@@ -434,11 +455,12 @@ class App:
     def pick_game(self):
         d = filedialog.askdirectory(title="Choose your Cyberpunk 2077 folder")
         if d:
-            d = os.path.normpath(d)
-            if not core.is_game_dir(d):
+            d = core.game_root(d)
+            if not d:
                 self.msg(
                     "error",
-                    "That is not the game folder (no bin\\x64\\Cyberpunk2077.exe).",
+                    "That is not the game folder (no bin\\x64\\Cyberpunk2077.exe). Pick the 'Cyberpunk 2077' "
+                    "folder (for the Xbox app: XboxGames\\Cyberpunk 2077\\Content).",
                 )
                 return
             self.game.set(d)
@@ -621,7 +643,7 @@ class App:
                 % ("; ".join(e.get("rel", e["file"]) for e in sel) or "nothing"),
             )
             if sel:
-                core.uninstall(sel, self.log)
+                core.uninstall(sel, self.log, game=self.game.get())
             w.destroy()
 
         bf = ttk.Frame(w)
@@ -670,7 +692,12 @@ class App:
                 core.INSTALL_LOCK.release()
 
     def start(self):
-        if self.busy:
+        if self.busy:  # the button says 'Stop' while a refit runs
+            self.rec("action", "Stop clicked")
+            self.log("Stopping ...")
+            self.cancel.set()
+            core.stop_tools()
+            self.go["state"] = "disabled"
             return
         files = list(self.lst.get(0, "end"))
         if not files:
@@ -701,7 +728,7 @@ class App:
             ),
         )
         self.busy = True
-        self.go["state"] = "disabled"
+        self.go.config(text="Stop")
         self.prog["value"] = 0
         self.cancel = threading.Event()
         args = (
@@ -711,7 +738,7 @@ class App:
             self.out_dir(),
             self.inst.get(),
             self.body_files(),
-            self.s.pop("wk_existing", None),
+            self.s.get("wk_existing"),  # forgotten only once a refit worked with it
             self.cancel,
             self.src_tag(),
             self.own.get(),
@@ -766,9 +793,13 @@ class App:
         except core.ToolError as e:
             put("Stopped: %s" % e)
             q.put(("error", str(e)))
-        except Exception:
-            put("Unexpected error:\n" + traceback.format_exc())
-            q.put(("error", "Unexpected error, see the log."))
+        except Exception as e:
+            why = core.explain(e)
+            put(
+                ("Stopped: %s\n" % why if why else "Unexpected error:\n")
+                + traceback.format_exc()
+            )
+            q.put(("error", why or "Unexpected error, see the log."))
 
     def poll(self):
         try:
@@ -780,8 +811,12 @@ class App:
                     self.prog["value"] = v
                 else:
                     self.busy = False
-                    self.go["state"] = "normal"
+                    self.go.config(text="Refit", state="normal")
                     self.prog["value"] = 1.0 if kind == "done" else self.prog["value"]
+                    if (
+                        kind == "done"
+                    ):  # the picked WolvenKit is copied now; later runs use the copy
+                        self.s.pop("wk_existing", None)
                     self.save()
                     if kind == "done":
                         self.results += v
@@ -794,7 +829,8 @@ class App:
                         self.msg("error", v)
         except queue.Empty:
             pass
-        self.root.after(100, self.poll)
+        finally:  # whatever fails above (shown by on_error), the window keeps listening to the worker
+            self.root.after(100, self.poll)
 
 
 def post_drop(root, paths):
@@ -837,10 +873,12 @@ def drive(
     body_files=None,
     replace_own=False,
     copy_moves=False,
+    stop_on=None,
 ):
     """Self-test: open the real window, drop an outfit on it, pick the body (and game folder, body file, Install
     tick, 'Replace the outfit's own version' tick), press Refit, wait for the result. close_on: text; when it shows up in the log, the window gets a real
-    WM_CLOSE (the user clicking X) in the middle of the refit.
+    WM_CLOSE (the user clicking X) in the middle of the refit. stop_on: text; when it shows up, the 'Stop' button is
+    clicked (state: "stopped", and "button": the button's text after the refit ended).
     -> {"ok": finished without error, "log": [window log lines], "worker": the refit thread}"""
     import ctypes, gc, time
 
@@ -895,12 +933,17 @@ def drive(
                 root.destroy()
                 return
         elif state["step"] == "wait_done":
-            if close_on and app.busy and any(close_on in m for m in lines):
+            if stop_on and app.busy and not state.get("stopped") and any(stop_on in m for m in lines):
+                log("  clicking 'Stop' during the refit")
+                state["stopped"] = app.go["text"] == "Stop"
+                app.go.invoke()
+            elif close_on and app.busy and any(close_on in m for m in lines):
                 log("  closing the window during the refit (WM_CLOSE)")
                 ctypes.windll.user32.PostMessageW(int(root.wm_frame(), 16), 0x10, 0, 0)
                 state["step"] = "closing"
                 state["closed"] = True
             elif not app.busy:
+                state["button"] = app.go["text"]
                 state["ok"] = not errors
                 if errors:
                     log("  FAIL: %s" % errors)

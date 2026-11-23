@@ -2,7 +2,7 @@ r"""Everything around the refit itself: settings, finding the game, getting Wolv
 from the user's own installed files, unpacking outfit downloads, installing/uninstalling refits.
 No widgets here: the GUI and the --selftest both call run_batch()."""
 
-import filecmp, fnmatch, glob, hashlib, json, os, re, shutil, subprocess, sys, tempfile, threading, time, urllib.request, zipfile
+import contextlib, filecmp, fnmatch, glob, hashlib, http.client, json, os, re, shutil, subprocess, sys, tempfile, threading, time, urllib.request, zipfile
 
 import rdar
 
@@ -25,7 +25,7 @@ if (
     except OSError:
         DATA = _OLD_DATA
 
-VERSION = "1.7"
+VERSION = "1.8"
 
 
 def documents_dir():
@@ -83,6 +83,34 @@ class ToolError(Exception):
     """A problem the user can understand and maybe fix; the message is shown as-is."""
 
 
+def explain(e):
+    """Plain words for Windows file errors a user can fix (access denied, disk full, path too long). -> text or
+    None for anything else."""
+    if isinstance(e, ToolError):
+        return str(e)
+    if not isinstance(e, OSError):
+        return None
+    f = e.filename or e.filename2 or ""
+    win = getattr(e, "winerror", None)
+    if isinstance(e, PermissionError) or win in (5, 32, 33):
+        return (
+            "Windows did not let the tool use %s. Close the game and any program that may have it open (a mod "
+            "manager, WolvenKit, an archive tool, a file window) and try again. If it is in a protected folder "
+            "(like Program Files), pick another output folder or install the refit yourself; an antivirus can "
+            "block it too." % (f or "a file")
+        )
+    if e.errno == 28 or win in (39, 112):
+        return "The disk is full (%s). Free some space and try again." % (
+            f or "no file name"
+        )
+    if isinstance(e, FileNotFoundError) and len(f) >= 240 or win == 206:
+        return (
+            "A file path got too long for Windows (%d characters). Move the download to a short folder like "
+            "C:\\Mods and try again." % len(f)
+        )
+    return None
+
+
 def bodies():
     return json.load(open(os.path.join(APP_DIR, "bodies.json"), encoding="utf-8"))
 
@@ -125,7 +153,10 @@ def load_settings():
 
 def save_settings(s):
     os.makedirs(DATA, exist_ok=True)
-    json.dump(s, open(_settings_path(), "w", encoding="utf-8"), indent=1)
+    tmp = _settings_path() + ".part"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(s, f, indent=1)
+    os.replace(tmp, _settings_path())  # an interrupted save never loses the settings
 
 
 # ---------------- game folder ----------------
@@ -135,6 +166,25 @@ def is_game_dir(p):
     return bool(p) and os.path.isfile(
         os.path.join(p, "bin", "x64", "Cyberpunk2077.exe")
     )
+
+
+def game_root(p):
+    r"""The game folder for a folder the user picked one level off: 'bin\x64' or 'bin' inside it, or the Xbox app's
+    outer folder (the game is in its 'Content'). -> path or None."""
+    if not p:
+        return None
+    p = os.path.normpath(p)
+    for c in (
+        p,
+        os.path.join(p, "Content"),
+        os.path.join(p, "Cyberpunk 2077"),
+        os.path.join(p, "Cyberpunk 2077", "Content"),
+        os.path.dirname(p),
+        os.path.dirname(os.path.dirname(p)),
+    ):
+        if is_game_dir(c):
+            return c
+    return None
 
 
 def _reg(root, key, value):
@@ -190,9 +240,10 @@ def find_game():
             r"GOG Galaxy\Games",
             r"Program Files\Epic Games",
             r"Games",
+            r"XboxGames",  # Xbox app / Game Pass: the game is in its Content folder
         ):
             cands.append(os.path.join(drive + ":\\", sub, "Cyberpunk 2077"))
-    return next((c for c in cands if is_game_dir(c)), None)
+    return next((game_root(c) for c in cands if game_root(c)), None)
 
 
 def mod_dir(game):
@@ -208,6 +259,8 @@ _FLAGS = (
 
 def run(args, game=None, ok=None):
     """Run a tool hidden at low priority. ok: text that marks success even on a non-zero exit (WolvenKit import)."""
+    if getattr(_JOB, "cancel", None) and _JOB.cancel.is_set():
+        raise ToolError("Stopped.")
     env = dict(os.environ, **_ENV)
     if game:
         env["CP77_DIR"] = game
@@ -223,7 +276,14 @@ def run(args, game=None, ok=None):
     )
     _RUNNING.add(p)
     try:
-        out, err = p.communicate()
+        out, err = p.communicate(timeout=TOOL_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.communicate()
+        raise ToolError(
+            "%s did not finish within %d minutes and was stopped. Try again; if it happens again, use "
+            "'Report Issues'." % (os.path.basename(str(args[0])), TOOL_TIMEOUT // 60)
+        )
     finally:
         _RUNNING.discard(p)
     if p.returncode and not (ok and ok in out):
@@ -235,6 +295,10 @@ def run(args, game=None, ok=None):
 
 
 _RUNNING = set()  # tools started by run() that are still working
+_JOB = threading.local()  # .cancel: the Event of the refit running in this thread (run() starts nothing once set)
+TOOL_TIMEOUT = (
+    30 * 60
+)  # ponytail: one WolvenKit / 7-Zip call; the biggest meshes seen take a few minutes
 
 
 def stop_tools():
@@ -254,10 +318,11 @@ def wk_exe():
 
 
 _ENV = {}  # extra environment for the tools (a working DOTNET_ROOT, see _wk_ready)
+# .NET's own "no fitting .NET" message always starts like this. ponytail: not "Microsoft.NETCore.App" alone: a
+# WolvenKit crash report names .NET's folder too, and 1.7 then blamed .NET for any crash (reported with 10.0.0 found)
 _NO_NET = (
     "You must install .NET",
     "You must install or update .NET",
-    "Microsoft.NETCore.App",
 )
 
 
@@ -293,7 +358,11 @@ def _wk_ready(exe, log):
         v = run([exe, "--version"]).strip()
     except (RuntimeError, OSError) as e:
         if not any(m in str(e) for m in _NO_NET):
-            raise ToolError("WolvenKit does not start:\n%s" % e)
+            raise ToolError(
+                "WolvenKit does not start. An antivirus may have blocked or removed one of its files: allow the "
+                "folder %s in your antivirus and press Refit again.\n\n%s"
+                % (os.path.dirname(exe), str(e)[-1500:])
+            )
         # WolvenKit can't find .NET 10. Often it is installed but a leftover DOTNET_ROOT setting (from developer
         # tools or game engines) sends WolvenKit to another folder: try every 64-bit .NET 10 found ourselves.
         rts = net_runtimes()
@@ -315,6 +384,7 @@ def _wk_ready(exe, log):
             raise ToolError(
                 "WolvenKit needs the free Microsoft .NET 10 Runtime (64-bit / x64). Install it from %s "
                 "(pick '.NET Runtime 10', x64), then press Refit again.\n\n.NET found on this PC: %s.%s"
+                "\n\nWhat WolvenKit said:\n%s"
                 % (
                     DOTNET_URL,
                     found or "none",
@@ -326,17 +396,18 @@ def _wk_ready(exe, log):
                     if os.environ.get("DOTNET_ROOT_X64")
                     or os.environ.get("DOTNET_ROOT")
                     else "",
+                    str(e)[-600:],
                 )
             )
     if not v.startswith(WK_VERSION):
         log(
             "Note: WolvenKit %s found; this tool is tested with %s."
-            % (v.splitlines()[0][:20], WK_VERSION)
+            % ((v.splitlines() or ["?"])[0][:20], WK_VERSION)
         )
     return exe
 
 
-def ensure_wolvenkit(log, progress=lambda f: None, existing=None):
+def ensure_wolvenkit(log, progress=lambda f: None, existing=None, retry=True):
     """WolvenKit.CLI in our data folder. existing: a WolvenKit folder the user already has (copied, never changed).
     Otherwise the official release zip is downloaded once and checked against its SHA-256."""
     exe = wk_exe()
@@ -348,9 +419,10 @@ def ensure_wolvenkit(log, progress=lambda f: None, existing=None):
         )
         if not os.path.isfile(src):
             raise ToolError("No WolvenKit.CLI.exe in %s." % existing)
-        log("Copying your WolvenKit from %s ..." % os.path.dirname(src))
-        shutil.rmtree(os.path.dirname(exe), ignore_errors=True)
-        shutil.copytree(os.path.dirname(src), os.path.dirname(exe))
+        if os.path.normcase(os.path.abspath(src)) != os.path.normcase(exe):
+            log("Copying your WolvenKit from %s ..." % os.path.dirname(src))
+            shutil.rmtree(os.path.dirname(exe), ignore_errors=True)
+            shutil.copytree(os.path.dirname(src), os.path.dirname(exe))
     if not os.path.isfile(exe):
         os.makedirs(DATA, exist_ok=True)
         zp = os.path.join(DATA, "WolvenKit.Console-%s.zip" % WK_VERSION)
@@ -377,7 +449,10 @@ def ensure_wolvenkit(log, progress=lambda f: None, existing=None):
                     got += len(b)
                     if total:
                         progress(got / total)
-        except OSError as e:
+        except (
+            OSError,
+            http.client.HTTPException,
+        ) as e:  # also a connection cut mid-download
             raise ToolError(
                 "Could not download WolvenKit (%s). Check your internet connection, or download\n%s\n"
                 "yourself, unzip it, and choose that folder under 'WolvenKit...'."
@@ -406,7 +481,15 @@ def ensure_wolvenkit(log, progress=lambda f: None, existing=None):
         open(os.path.join(os.path.dirname(exe), "appsettings.json"), "w"),
         indent=1,
     )
-    return _wk_ready(exe, log)
+    try:
+        return _wk_ready(exe, log)
+    except ToolError as e:
+        # a broken copy of our own download (a file removed by an antivirus, a cut-off unzip): get it fresh once
+        if existing or "does not start" not in str(e) or not retry:
+            raise
+        log("WolvenKit does not start; downloading it again ...")
+        shutil.rmtree(os.path.dirname(exe), ignore_errors=True)
+        return ensure_wolvenkit(log, progress, retry=False)
 
 
 def ensure_oodle(game):
@@ -472,7 +555,7 @@ def check_body_file(path, tag):
                     % (os.path.basename(path), body_name(tag))
                 )
     elif low.endswith((".7z", ".rar")):
-        if not find_7z():
+        if not (find_7z() or find_tar()):
             raise ToolError(
                 "To read a .7z or .rar, install 7-Zip (7-zip.org), or unpack the download yourself and pick "
                 "the body mod's .archive instead."
@@ -550,10 +633,12 @@ def ensure_cages(key, sources, game, wk, log):
     d = cage_dir(key)
     stamp = _stamp(sources)
     glbs = sorted(glob.glob(os.path.join(d, "*.glb")))
+    shapes = bodies()["bodies"][key].get("shapes", {})
     try:
         if (
             len(glbs) == 3
             and open(os.path.join(d, "source.txt"), encoding="utf-8").read() == stamp
+            and (not shapes or os.path.isfile(os.path.join(d, "shapes.txt")))
         ):
             return ";".join(glbs)
     except (OSError, ValueError):
@@ -563,10 +648,15 @@ def ensure_cages(key, sources, game, wk, log):
         % ("vanilla" if key == "vanilla" else body_name(key))
     )
     shutil.rmtree(d, ignore_errors=True)
+    import refit
+
+    refit.forget_bodies()  # the same file names get the new shape: drop what was cached from the old one
     tmp = tempfile.mkdtemp(prefix="cage_", dir=_work_root())
     try:
         meshes = bodies()["meshes"]
-        rx = "^(" + "|".join(re.escape(m) for m in meshes) + ")$"
+        rx = (
+            "^(" + "|".join(re.escape(m) for m in meshes + list(shapes.values())) + ")$"
+        )
         ub = os.path.join(tmp, "x")
         for s in sources:
             if not bodies()["bodies"][key].get("game"):
@@ -585,6 +675,26 @@ def ensure_cages(key, sources, game, wk, log):
         glbs = sorted(glob.glob(os.path.join(d, "*.glb")))
         if len(glbs) != 3:
             raise ToolError("WolvenKit could not export the body shape.")
+        got = []
+        for (
+            tag,
+            m,
+        ) in (
+            shapes.items()
+        ):  # chest shape add-ons; an older body version may not have them
+            mp = os.path.join(ub, m)
+            if os.path.isfile(mp):
+                try:
+                    od = os.path.join(d, "shapes", tag)
+                    os.makedirs(od)
+                    run([wk, "export", mp, "-o", od, "-gp", game], game)
+                    got.append(tag)
+                except RuntimeError:
+                    pass
+        if shapes:
+            open(os.path.join(d, "shapes.txt"), "w", encoding="utf-8").write(
+                " ".join(got)
+            )
         open(os.path.join(d, "source.txt"), "w", encoding="utf-8").write(stamp)
         return ";".join(glbs)
     except Exception:
@@ -592,6 +702,28 @@ def ensure_cages(key, sources, game, wk, log):
         raise
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def shape_cage(cage, key, tag):
+    """The body shape of body key while an outfit with visual tag `tag` is worn: the chest add-on mesh replaces the
+    full body's chest submeshes (hide=...), as the body mod's .xl does. The normal shape when the body has no such
+    add-on (or tag is None)."""
+    b = bodies()["bodies"][key]
+    g = (
+        glob.glob(
+            os.path.join(os.path.dirname(cage.split(";")[0]), "shapes", tag, "*.glb")
+        )
+        if tag in b.get("shapes", {})
+        else []
+    )
+    if not g:
+        return cage
+    hide = "|hide=" + ",".join(map(str, b["shape_hide"]))
+    parts = [
+        p + hide if os.path.basename(p).lower() == "t0_000_pwa_base__full.glb" else p
+        for p in cage.split(";")
+    ]
+    return ";".join(parts + [g[0]])
 
 
 _WB = "base\\characters\\base_entities\\woman_base\\"
@@ -632,6 +764,9 @@ def rig_mods(game):
                 )
             except Exception:  # a broken archive: only its name can tell
                 hit = bool(RIG_NAME.search(f))
+            # ragdoll mods replace V's rig only for how she falls, not her shape (reported: CrT_RagdollProfiles)
+            if hit and re.search(r"ragdoll", f, re.I) and not RIG_NAME.search(f):
+                hit = False
             if hit:
                 hits.add(os.path.relpath(p, md))
     return sorted(hits, key=str.lower)
@@ -669,14 +804,37 @@ def clean_old_work():
 
 
 def find_7z():
+    """7-Zip's 7z.exe: on PATH, in its usual folders, or where its installer says (any folder)."""
+    import winreg
+
+    reg = [
+        _reg(root, r"SOFTWARE\7-Zip", v)
+        for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER)
+        for v in ("Path64", "Path")
+    ]
     for p in (
-        shutil.which("7z"),
-        r"C:\Program Files\7-Zip\7z.exe",
-        r"C:\Program Files (x86)\7-Zip\7z.exe",
+        [shutil.which("7z")]
+        + [os.path.join(r, "7z.exe") for r in reg if r]
+        + [
+            r"C:\Program Files\7-Zip\7z.exe",
+            r"C:\Program Files (x86)\7-Zip\7z.exe",
+        ]
     ):
         if p and os.path.isfile(p):
             return p
     return None
+
+
+def find_tar():
+    """Windows' own tar.exe (libarchive). Windows 11 builds read .7z and .rar too, so most people need no 7-Zip."""
+    p = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "tar.exe")
+    return p if os.path.isfile(p) else None
+
+
+NO_7Z = (
+    "To open .7z or .rar files, install 7-Zip (free, 7-zip.org), or unpack the download yourself "
+    "and add the folder instead."
+)
 
 
 VARIANT_BODY = re.compile(
@@ -693,7 +851,11 @@ def shown_name(path):
 
 
 def outfit_name(path):
-    return re.sub(r"\W+", "_", shown_name(path)).strip("_")[:60] or "outfit"
+    n = re.sub(r"\W+", "_", shown_name(path)).strip("_") or "outfit"
+    # cut long names, with a short checksum so two downloads with the same start (main + optional file) differ
+    return (
+        n if len(n) <= 60 else n[:52] + "_" + hashlib.sha1(n.encode()).hexdigest()[:7]
+    )
 
 
 def unpack(path, dest, only=None):
@@ -715,12 +877,20 @@ def unpack(path, dest, only=None):
             )
     elif low.endswith((".7z", ".rar")):
         z = find_7z()
-        if not z:
-            raise ToolError(
-                "To open .7z or .rar files, install 7-Zip (7-zip.org), or unpack the download yourself "
-                "and add the folder instead."
-            )
-        run([z, "x", "-y", "-o" + dest, path] + ([only, "-r"] if only else []))
+        if z:
+            run([z, "x", "-y", "-o" + dest, path] + ([only, "-r"] if only else []))
+        elif find_tar():
+            try:  # tar matches --include against the whole path inside the download
+                run(
+                    [find_tar(), "-x", "-f", path, "-C", dest]
+                    + (["--include", "*" + only] if only else [])
+                )
+            except RuntimeError as e:
+                raise ToolError(
+                    "%s\n(Windows could not open it: %s)" % (NO_7Z, str(e)[-300:])
+                )
+        else:
+            raise ToolError(NO_7Z)
     else:
         raise ToolError(
             "%s is not a zip, 7z, rar, folder or .archive." % os.path.basename(path)
@@ -894,8 +1064,13 @@ def _save_installed(lst):
 def _copy(src, dst):
     """Copy under a temporary name, then rename: a file in the game is either complete or not there."""
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    shutil.copy2(src, dst + ".part")
-    os.replace(dst + ".part", dst)
+    try:
+        shutil.copy2(src, dst + ".part")
+        os.replace(dst + ".part", dst)
+    except OSError:  # e.g. the game holds the old file open, or the disk is full: leave nothing half-done behind
+        if os.path.exists(dst + ".part"):
+            os.remove(dst + ".part")
+        raise
 
 
 def _inside(path, folder):
@@ -911,11 +1086,38 @@ def _entry(dst, game, kind, outfit):
         "kind": kind,
         "outfit": outfit,
         "date": time.strftime("%Y-%m-%d %H:%M"),
+        "stamp": _stamp_of(dst),
     }
+
+
+def _stamp_of(p):
+    """Size and change time of an installed file: uninstall only removes it while it is still the tool's copy."""
+    st = os.stat(p)
+    return [st.st_size, int(st.st_mtime)]
 
 
 def _key(e):
     return os.path.normcase(os.path.join(e["folder"], e["file"]))
+
+
+@contextlib.contextmanager
+def _install_errors(log, res):
+    """with-block around installing a finished refit: a Windows file error there doesn't lose the refit, it is
+    reported in plain words and the outfit still counts as refit (the file is in the output folder)."""
+    try:
+        yield
+    except OSError as e:
+        log(
+            "The refit is made but could not be installed: %s\nIt is in %s; copy it into "
+            "<game>\\archive\\pc\\mod yourself."
+            % (explain(e) or e, os.path.dirname(res))
+        )
+
+
+def _refit_body(name):
+    """'eve' for !!!EveRefit_x.archive, None for a file that isn't this tool's refit."""
+    m = REFIT_NAME.match(os.path.basename(name))
+    return m.group(1).lower() if m else None
 
 
 def install(files, game, log, outfit=""):
@@ -925,18 +1127,42 @@ def install(files, game, log, outfit=""):
     for f in files:
         dst = os.path.join(mod_dir(game), os.path.basename(f))
         k = os.path.normcase(dst)
-        if os.path.exists(dst) and k not in mine:
+        same = (
+            os.path.normcase(os.path.abspath(f)) == k
+        )  # output folder = the game's mod folder itself
+        if os.path.exists(dst) and k not in mine and not same:
             log(
                 "Not installed: %s already exists in the game and was not made by this tool."
                 % os.path.basename(f)
             )
             continue
-        _copy(f, dst)
-        if k not in mine:
-            lst.append(_entry(dst, game, "refit", outfit))
-            mine.add(k)
+        if not same:
+            _copy(f, dst)
+        lst = [e for e in lst if _key(e) != k] + [_entry(dst, game, "refit", outfit)]
+        mine.add(k)
         _save_installed(lst)
         log("Installed into the game: %s" % os.path.basename(f))
+        # an older refit of this outfit that replaces the game's files ('!!!', e.g. made for the other body or with
+        # 'Replace the outfit's own version') would win over this one, and one for the same body (1.7 named long
+        # outfits differently) is the same thing twice: take it out
+        old = [
+            e
+            for e in lst
+            if e.get("kind") == "refit"
+            and e.get("outfit") == outfit
+            and outfit
+            and _key(e) != k
+            and (
+                e["file"].startswith("!")
+                or (_refit_body(f) and _refit_body(e["file"]) == _refit_body(f))
+            )
+        ]
+        if old:
+            log(
+                "Taking out the older refit of this outfit, it would win over the new one:"
+            )
+            uninstall(old, log, locked=True)
+            lst = installed()
 
 
 def archives_in_game(game):
@@ -1034,17 +1260,40 @@ def install_original(plan, game, log, outfit=""):
     return n
 
 
-def uninstall(entries, log):
-    """Remove the given install-list entries (refits, or originals this tool installed) from the game."""
+def uninstall(entries, log, locked=False, game=None):
+    """Remove the given install-list entries (refits, or originals this tool installed) from the game. A file that
+    changed since (e.g. the same mod installed again by a mod manager) is kept. locked: INSTALL_LOCK already held."""
+    if not locked:
+        with (
+            INSTALL_LOCK
+        ):  # never at the same time as a refit being installed (both write the list)
+            return uninstall(entries, log, True, game)
     gone = {_key(e) for e in entries}
     keep = []
     for e in installed():
-        if _key(e) in gone:
-            p = os.path.join(e["folder"], e["file"])
-            if os.path.exists(p):
+        if _key(e) not in gone:
+            keep.append(e)
+            continue
+        p, name = os.path.join(e["folder"], e["file"]), e.get("rel", e["file"])
+        if (
+            not os.path.exists(p) and game and e.get("rel")
+        ):  # the game folder moved (e.g. another Steam library)
+            p = os.path.join(game, e["rel"])
+        try:
+            if not os.path.exists(p):
+                log("Already gone from the game: %s" % name)
+            elif e.get("stamp") and _stamp_of(p) != e["stamp"]:
+                log(
+                    "Kept %s: it changed since this tool installed it (another install?)."
+                    % name
+                )
+            else:
                 os.remove(p)
-            log("Removed from the game: %s" % e.get("rel", e["file"]))
-        else:
+                log("Removed from the game: %s" % name)
+        except (
+            OSError
+        ) as x:  # e.g. the game is running: keep it on the list, go on with the rest
+            log("Not removed: %s" % (explain(x) or x))
             keep.append(e)
     _save_installed(keep)
 
@@ -1084,7 +1333,8 @@ def setup(
     if not found[tgt]:
         raise ToolError(
             "%s is not installed in the game (archive\\pc\\mod). Install the body mod first (%s), "
-            "or pick its download or .archive file with 'Body file...' next to 'Your body mod'."
+            "or pick its download or .archive file with 'Body file...' next to 'Your body mod'. (With Mod "
+            "Organizer 2 your mods are not in the game folder, so always pick the body file that way.)"
             % (body_name(tgt), bodies()["bodies"][tgt].get("page", ""))
         )
     if not found[src]:
@@ -1138,6 +1388,7 @@ def run_batch(
     import refit
 
     cancel = cancel or threading.Event()
+    _JOB.cancel = cancel
     clean_old_work()
     wk, cages = setup(game, src, tag, log, progress, body_files, wk_existing)
     log("Refitting from %s to %s." % (body_name(src), body_name(tag)))
@@ -1180,9 +1431,9 @@ def run_batch(
             )
             missing = bool(res) and original_missing(arcs, game)
             if res and do_install:
-                with INSTALL_LOCK:
+                with INSTALL_LOCK, _install_errors(log, res):
                     if cancel.is_set():
-                        log("Stopped before installing (the window was closed).")
+                        log("Stopped before installing.")
                         break
                     install([res], game, log, shown)
                     if missing:
@@ -1206,14 +1457,22 @@ def run_batch(
             elif missing:
                 log(MISSING_TEXT % shown)
             results.append((inp, res, "ok" if res else "nothing to refit", missing))
-        except ToolError as e:
-            log("Could not refit this outfit: %s" % e)
-            results.append((inp, None, str(e), False))
         except (
             Exception
         ) as e:  # keep going with the next outfit; full detail goes to the log
-            log("Could not refit this outfit (unexpected error): %r" % e)
-            results.append((inp, None, repr(e), False))
+            if cancel.is_set():  # 'Stop' clicked or the window closed: a killed tool's error is just that
+                log("Stopped. Nothing was kept from this outfit.")
+                results.append((inp, None, "stopped", False))
+                break
+            why = explain(
+                e
+            )  # a ToolError's own text, or plain words for Windows file errors
+            log(
+                "Could not refit this outfit: %s" % why
+                if why
+                else "Could not refit this outfit (unexpected error): %r" % e
+            )
+            results.append((inp, None, why or repr(e), False))
         finally:
             if not os.environ.get("BODYREFIT_KEEP_WORK"):
                 shutil.rmtree(work, ignore_errors=True)

@@ -8,11 +8,13 @@ vanilla → Angel / EVE, Angel / EVE → vanilla, and Angel ↔ EVE.
 ## Quick start
 
 1. Download **OutfitRefitter.zip** from the [Releases page](https://github.com/jj-repository/cp2077-outfit-refitter/releases).
-2. Unzip it anywhere, for example on your Desktop.
+2. Unzip it anywhere, for example on your Desktop. **Unzip first**: started from inside the zip, it can't find
+   its own files.
 3. Double-click **OutfitRefitter.exe** in the `OutfitRefitter` folder.
 
 - **Windows SmartScreen** may say "Windows protected your PC", because the tool is new and not signed.
-  Click **More info**, then **Run anyway**.
+  Click **More info**, then **Run anyway**. Windows 11's **Smart App Control**, when it is on, blocks unsigned
+  programs completely; then the tool can't run on that PC.
 - If the tool says the **.NET 10 Runtime** is missing, install Microsoft's free
   [.NET 10 Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) and start the tool again.
   WolvenKit needs it (the 64-bit / x64 one; the WolvenKit app itself brings its own .NET, so it starting fine
@@ -57,7 +59,7 @@ need a hand-made refit. Always look at the result in game.
 
 ## What you need
 
-- Cyberpunk 2077 (Steam, GOG or Epic) on Windows.
+- Cyberpunk 2077 (Steam, GOG, Epic or the Xbox app) on Windows.
 - The body mod you use, installed normally: [Hyst Angel](https://www.nexusmods.com/cyberpunk2077/mods/14896)
   or [Hyst EVE](https://www.nexusmods.com/cyberpunk2077/mods/29810). (Nothing, if you refit to the normal body.)
 - For an outfit made for a body you don't have installed (for example an Angel outfit while you use EVE): that
@@ -113,15 +115,37 @@ The original outfit must be in your game as well. If it is missing, the log says
 Click **Uninstall...**. The list shows everything the tool put into your game:
 **Refit** (the reshaped file) and **Original outfit** (outfits it installed because they were missing).
 Select what you want to remove and click **Remove selected**.
-The tool only removes files it installed itself.
+The tool only removes files it installed itself, and only while they are unchanged: a file that changed since
+(for example the same mod installed again with a mod manager) is kept, and the log says so.
+When you refit an outfit again (for example for the other body), the new refit replaces the tool's older refit of
+that outfit in the game, so the old one can't win over it.
 
 ## Having a problem?
 
 Click **Report Issues** and send the file it makes to the mod author.
 It is a plain text file, saved in your output folder; the tool opens that folder for you.
 It lists what you did in the tool, the log, any errors, your settings, and what the tool finds in your game folder
-(game, ArchiveXL, TweakXL, Codeware, RED4ext, body mods, rig / breast physics mods, the outfits' files, the refits).
-It contains no file contents, and your Windows user name is replaced. You can open it first to see what's inside.
+(game, ArchiveXL, TweakXL, Codeware, RED4ext, body mods, rig / breast physics mods, the outfits' files, the refits),
+and things on your PC that can get in the way: Windows version and language, free space, whether the tool can write
+to its folders, your antivirus' name, Smart App Control, 7-Zip, whether WolvenKit starts, .NET, the game's store,
+Vortex / Mod Organizer 2.
+It contains no file contents; your Windows user name is replaced and your PC's name is not in it. You can open it
+first to see what's inside.
+
+### Common problems
+
+- **Game folder not found**: click **Change...** and pick the `Cyberpunk 2077` folder (Xbox app:
+  `XboxGames\Cyberpunk 2077\Content`). A folder one level off (`bin\x64`, or the Xbox app's outer folder) is
+  corrected by itself.
+- **"Windows did not let the tool use ..."**: close the game and anything that might have the file open (a mod
+  manager, an archive tool), then try again. A game in a protected folder (Program Files): untick Install and copy
+  the refit yourself. If installing fails, the refit is still in the output folder.
+- **"WolvenKit does not start"**: usually an antivirus. The tool downloads WolvenKit again once by itself; if that
+  doesn't help, allow the folder named in the message.
+- **.7z / .rar**: Windows 11 opens them itself (the tool uses Windows' own `tar`); 7-Zip is used when it is
+  installed. Otherwise install 7-Zip, or unpack the download and add the folder.
+- **Mod Organizer 2**: its mods are not in the game folder, so the tool can't see your body mod there: pick it with
+  **Body file...**.
 
 ## Good to know
 
@@ -160,6 +184,10 @@ It contains no file contents, and your Windows user name is replaced. You can op
   without its tweak file, so the tool can find them. Outfits without that information are refit as before.
 - **Chest size**: Hyst tells you to set V's chest size (*Breast*) to *Big* for Angel. That setting changes how V looks
   nude; in clothes her chest is the same with every setting, so refits fit all of them.
+- **Chest shape add-ons**: some outfits switch Angel's or EVE's chest to its *natural* or *squish* shape while they are
+  worn. The tool sees that and fits those outfits to that shape (the log says so).
+- **Layered outfits**: when something is worn over a piece, the game squashes that piece toward the body. The tool fits
+  that squashed shape to your body too.
 - **Rig mods that change the breast area** (for example "All the Rigs") and breast physics mods: Hyst says they make
   some clothes clip with these bodies, mostly when V moves. The tool finds such mods in your game and says so in the
   log; tick **Make clothes move with the body** so tight clothes follow those movements.
@@ -269,6 +297,53 @@ the WolvenKit team or Nexus Mods.
 8. WolvenKit packs the archive. The final check decodes every buffer of every mesh with the game's
    Oodle library, compares zero-filled tails against the source mesh, and checks the archive index
    checksum (a wrong one crashes the game at startup). Any problem = no file is written.
+   The archive gets its final name only once it is complete (written as `.part`, then renamed; the same for files
+   copied into the game, the install list and the settings).
+
+Fit details (1.8):
+- **Chest shape add-ons**: an appearance with the visual tag `hyst_boobs_natural` / `hyst_boobs_squish` (EVE also
+  `hyst_boobs_nipple`) makes the body's `.xl` hide submeshes 0-2 of the full body and show `base\vtk\femv_boobs_*.mesh`
+  instead. The tool extracts those meshes with the body (`bodies.json` `shapes`, `cages\<body>\shapes\<tag>`), reads
+  the tags from the outfit's serialized `.app` (the appearance's own components and the mesh `.ent` files it names
+  as parts) and uses "full body without submeshes 0-2 + add-on" as source and/or target for those meshes (only for a
+  body that has that add-on). Measured: a garment refit to the normal Angel body had 153 vertices up to 13.2 mm
+  inside the squish body (EVE: 15, 2.5 mm); refit to the add-on: 0. Checked on real tagged outfits (Kiki's Little
+  Dove Top: natural; Hyst Halter Lace Up: squish).
+- **Garment support**: the `GarmentSupport` morph target (the squashed shape shown while a higher layer is worn) is
+  refit as well: new delta = refit(base + delta) - refit(base). WolvenKit's import writes it into the mesh (checked
+  by re-export). Polly Dress: squashed shape 652 vertices up to 7.7 mm inside Angel before, 0 after. Meshes rebuilt
+  by the tool itself (big buffers, own reader) keep the original delta.
+- **Breast tips / nipples**: Angel and EVE show nipple meshes (`base\vtk\nipples\pwa_nipples_*`, moved by chest-size
+  morph targets WolvenKit can't export) that stick out of the body shape, also under clothes; with clothing at the
+  4 mm floor they poked through (reported with a screenshot). Hyst's own Angel vanilla refits sit 4.0-9.3 mm
+  (typically 5-6 mm) over the breast tips, down to 1.6 mm elsewhere on the chest. So near the tips (the most forward
+  chest point per side of the target shape, also for chest add-ons) the floor rises by `nipple_room` (3 mm,
+  `bodies.json`), fading out over 3 cm: our refits of the same six vanilla tops now sit 4.4-6.0 mm there (before:
+  4.0 everywhere). Coarse garments matter here too: a flat triangle over the curved tip dips ~1 mm below its corners.
+- **Feet**: the body shape has flat feet; shoes for raised feet overlap them by design (Casual Pt.5 shoes: 5,086
+  vertices up to 25 mm inside the vanilla body in the original). Below 35 cm, vertices that were inside the source
+  body stay where the field puts them (a refit moves the feet 1-4 mm); before, 4,990 of them were pushed out.
+
+Robustness (1.8):
+- A mesh that fails in the refit step (an exception, too little memory) is skipped and listed; the rest of the outfit
+  is still refit. WolvenKit / 7-Zip calls time out after 30 minutes; after the window is closed, a running refit
+  starts no new tool.
+- A `{body}` family member that isn't worn on the body (far from both bodies) is **copied unchanged** to the target
+  body's name, so the part doesn't go missing for that body (ArchiveXL resolves the substituted path; there is no
+  fallback to `_base_body`). First-person (`_fpp`) meshes are refit like any other: they sit on the body, and Hyst's
+  own per-body first-person meshes are shaped to Angel / EVE (measured on two outfits: our refit is within 11.8 mm of
+  Hyst's version for 95 % of points, unchanged it is 33.9 mm).
+- Body-shape caches are cleared when a body is read again from a changed body file.
+- Install: the tool's older refit of the same outfit is taken out when it would win (`!!!` prefix) or is the same body
+  (1.8 shortens long outfit names with a checksum, so two downloads with the same first 60 characters can't collide).
+  Uninstall removes a file only while its size and time still match what was installed, and waits for a running
+  install (one lock for the install list).
+- Plain messages for Windows file errors (access denied / file in use, disk full, path too long); an install that
+  fails keeps the refit in the output folder. A WolvenKit that doesn't start (not a .NET problem) is downloaded
+  again once.
+- `.7z` / `.rar` without 7-Zip: Windows' own `tar.exe` (libarchive); 7-Zip is also found through its registry entry.
+- Game folder: the Xbox app's `XboxGames\Cyberpunk 2077\Content` is searched; a picked folder one level off is
+  corrected.
 
 Output (`<Body>` = the target: `Angel`, `Eve`, `Vanilla`):
 - Dynamic meshes (`*_{body}.mesh`): the source body's member (`_base_body` for vanilla, `_angel`, `_eve`) is refit

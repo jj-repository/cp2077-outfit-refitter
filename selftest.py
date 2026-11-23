@@ -268,6 +268,108 @@ def check_source(core):
         shutil.rmtree(t, ignore_errors=True)
 
 
+def check_install_rules(core):
+    """In a fake game folder: a newer refit takes out the older '!!!' refit of the same outfit; uninstall keeps a
+    file that changed since it was installed and says when one is already gone; file errors read plainly."""
+    t = tempfile.mkdtemp(prefix="outfitrefit_inst_ ä ")
+    data = core.DATA
+    try:
+        core.DATA = os.path.join(t, "data")
+        game = os.path.join(t, "game")
+        os.makedirs(os.path.join(game, "bin", "x64"))
+        open(os.path.join(game, "bin", "x64", "Cyberpunk2077.exe"), "w").close()
+        out = os.path.join(t, "out")
+        os.makedirs(out)
+
+        def made(name, body="x"):
+            p = os.path.join(out, name)
+            open(p, "w").write(body)
+            return p
+
+        msgs = []
+        core.install([made("!!!AngelRefit_X.archive")], game, msgs.append, "X")
+        core.install([made("Other.archive")], game, msgs.append, "Y")
+        core.install([made("AngelRefit_X.archive")], game, msgs.append, "X")
+        md = core.mod_dir(game)
+        assert not os.path.exists(os.path.join(md, "!!!AngelRefit_X.archive")), msgs
+        assert sorted(e["file"] for e in core.installed()) == [
+            "AngelRefit_X.archive",
+            "Other.archive",
+        ]
+        # another body's normal refit stays (each body uses its own); the same body's under a new name replaces it
+        core.install([made("EveRefit_X.archive")], game, msgs.append, "X")
+        core.install([made("AngelRefit_X_1234567.archive")], game, msgs.append, "X")
+        assert sorted(e["file"] for e in core.installed()) == [
+            "AngelRefit_X_1234567.archive",
+            "EveRefit_X.archive",
+            "Other.archive",
+        ], core.installed()
+        core.uninstall(
+            [e for e in core.installed() if e["file"] != "Other.archive"], msgs.append
+        )
+        core.install([made("AngelRefit_X.archive")], game, msgs.append, "X")
+        open(os.path.join(md, "Other.archive"), "a").write("changed by someone else")
+        os.remove(os.path.join(md, "AngelRefit_X.archive"))
+        msgs = []
+        core.uninstall(core.installed(), msgs.append)
+        assert os.path.exists(os.path.join(md, "Other.archive")), msgs
+        assert any("Other.archive: it changed since" in m for m in msgs) and any(
+            "Already gone" in m for m in msgs
+        ), msgs
+        assert core.installed() == []
+        # the game folder moved (another Steam library): uninstall finds the file in the new place
+        core.install([made("Move.archive")], game, msgs.append, "M")
+        moved = game + " moved"
+        os.rename(game, moved)
+        msgs = []
+        core.uninstall(core.installed(), msgs.append, game=moved)
+        assert not os.path.exists(os.path.join(core.mod_dir(moved), "Move.archive")), (
+            msgs
+        )
+        assert core.installed() == [], core.installed()
+        assert "Windows did not let" in core.explain(PermissionError(13, "x", "f"))
+        assert "disk is full" in core.explain(OSError(28, "x", "f"))
+        assert core.explain(ValueError()) is None
+    finally:
+        core.DATA = data
+        shutil.rmtree(t, ignore_errors=True)
+
+
+def check_tar(core):
+    """Without 7-Zip, .7z downloads are opened with Windows' tar (only the asked files when 'only' is given), and
+    game_root() finds the game folder from a folder one level off."""
+    t = tempfile.mkdtemp(prefix="outfitrefit_tar_ ä ")
+    real = core.find_7z
+    try:
+        src = os.path.join(t, "src")
+        os.makedirs(os.path.join(src, "Vanilla ö", "archive"))
+        for rel in (os.path.join("Vanilla ö", "archive", "a.archive"), "readme.txt"):
+            open(os.path.join(src, rel), "w").write("x")
+        z = os.path.join(t, "dl.7z")
+        core.run([core.find_tar(), "-c", "--format", "7zip", "-f", z, "-C", src, "."])
+        core.find_7z = lambda: None
+        out = core.unpack(z, os.path.join(t, "all"))
+        got = sorted(
+            os.path.relpath(os.path.join(dp, f), out)
+            for dp, _, fs in os.walk(out)
+            for f in fs
+        )
+        assert got == sorted(
+            [os.path.join("Vanilla ö", "archive", "a.archive"), "readme.txt"]
+        ), got
+        out = core.unpack(z, os.path.join(t, "only"), "*.archive")
+        got = [f for _, _, fs in os.walk(out) for f in fs]
+        assert got == ["a.archive"], got
+        game = core.find_game()
+        if game:
+            assert core.game_root(os.path.join(game, "bin", "x64")) == game
+            assert core.game_root(os.path.dirname(game)) in (game, None)
+        assert core.game_root(t) is None
+    finally:
+        core.find_7z = real
+        shutil.rmtree(t, ignore_errors=True)
+
+
 def check_dotnet(core):
     """WolvenKit and .NET: a leftover DOTNET_ROOT pointing to an empty folder is worked around (the installed .NET 10
     is found and used); with no .NET 10 anywhere the message says what was found. Needs .NET 10 installed."""
@@ -299,6 +401,29 @@ def check_dotnet(core):
             assert ".NET found on this PC: none" in str(
                 e
             ) and "DOTNET_ROOT setting" in str(e), e
+            assert "What WolvenKit said" in str(e), e
+        # a WolvenKit crash whose report names .NET's folder is not 'missing .NET' (1.7 said so with 10.0.0 found)
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        real = core.run
+
+        def crash(args, game=None, ok=None):
+            raise RuntimeError(
+                "WolvenKit.CLI.exe --version failed:\nUnhandled exception. System.DllNotFoundException\n   at "
+                r"C:\Program Files\dotnet\shared\Microsoft.NETCore.App\10.0.0\System.Private.CoreLib.dll"
+            )
+
+        core.run = crash
+        try:
+            core._wk_ready(core.wk_exe(), seen.append)
+            raise AssertionError("no error for a crash")
+        except core.ToolError as e:
+            assert "does not start" in str(e) and "DllNotFoundException" in str(e), e
+        finally:
+            core.run = real
     finally:
         for k, v in old.items():
             if v is None:
@@ -325,6 +450,26 @@ def check_rigs(core):
         got = [os.path.basename(x) for x in core.rig_mods(t)]
         assert got == ["All The Rigs - Breasts.archive", "body_physics_v.archive"], got
         assert core.rig_mods(os.path.join(t, "none")) == []
+        # by content: an archive that replaces V's rig counts, unless it is a ragdoll mod (how she falls, not her shape)
+        real = core.rdar.Rdar
+
+        class FakeRig:
+            def __init__(self, p):
+                self.names = []
+
+            def hashes(self):
+                return {core.rdar.fnv(core.V_RIGS[0])}
+
+        md2 = os.path.join(t, "rig", "archive", "pc", "mod")
+        os.makedirs(md2)
+        for f in ("CrT_RagdollProfiles_Base.archive", "My Rig Replacer.archive"):
+            open(os.path.join(md2, f), "wb").write(b"stub")
+        core.rdar.Rdar = FakeRig
+        try:
+            got = [os.path.basename(x) for x in core.rig_mods(os.path.join(t, "rig"))]
+        finally:
+            core.rdar.Rdar = real
+        assert got == ["My Rig Replacer.archive"], got
     finally:
         shutil.rmtree(t, ignore_errors=True)
 
@@ -1027,6 +1172,27 @@ def gui_source_tests(core, gui, a, log, fails):
     check(
         "close mid-refit: no file left behind", os.listdir(out2) == [], os.listdir(out2)
     )
+    # 8. the 'Stop' button while refitting
+    out3 = os.path.join(base, "Ausgabe Stopp ö")
+    os.makedirs(out3, exist_ok=True)
+    st = gui.drive(
+        outfit,
+        "vanilla",
+        out3,
+        log,
+        game=game,
+        src="angel",
+        body_files=barch,
+        stop_on="=== ",
+    )
+    check("Stop: the button said 'Stop' while refitting", st.get("stopped"))
+    check(
+        "Stop: the refit ended, the button says 'Refit' again",
+        st.get("button") == "Refit",
+        st.get("button"),
+    )
+    check("Stop: the log says it stopped", has(st, "Stopped"))
+    check("Stop: no file left behind", os.listdir(out3) == [], os.listdir(out3))
     mods1 = sorted(
         (os.path.relpath(os.path.join(dp, f), md), os.path.getsize(os.path.join(dp, f)))
         for dp, _, fs in os.walk(md)
@@ -1310,7 +1476,21 @@ def support_tests(core, gui, a, log, fails):
         )
         check(
             "report A: body mod found",
-            "05_Hyst_Angel_BodyMod.archive (Hyst Angel)" in game_a,
+            "05_Hyst_Angel_BodyMod.archive (Hyst Angel, could not be read)" in game_a,
+        )
+        check(
+            "report A: this PC (WolvenKit start test, antivirus, folders, unpacking, store)",
+            all(
+                s in A
+                for s in (
+                    "WolvenKit start test: 9.1.1",
+                    "Antivirus: ",
+                    "Data folder: writable yes",
+                    "Unpacking .7z / .rar: ",
+                    "Game store files: ",
+                    "Smart App Control: ",
+                )
+            ),
         )
         check(
             "report A: duplicate flagged",
@@ -1485,12 +1665,30 @@ def chest_test(core, wk, game, spec, run_case, barch, log, fails):
     import numpy as np
     import refit
 
-    tag, inp = spec.split("=")
-    log("\n### clothed chest, vanilla -> %s: %s" % (tag, os.path.basename(inp)))
+    # TAG:SHAPE (e.g. angel:hyst_boobs_squish): the outfit is treated as carrying that chest shape tag, so the body to
+    # check against is the body with that chest add-on, and the log must say the shape is used
+    tag, inp = spec.split("=", 1)
+    tag, _, shape = tag.partition(":")
+    log(
+        "\n### clothed chest, vanilla -> %s%s: %s"
+        % (tag, " (%s)" % shape if shape else "", os.path.basename(inp))
+    )
     _, cages = core.setup(game, "vanilla", tag, log, body_files=barch)
+    body = core.shape_cage(cages[tag], tag, shape) if shape else cages[tag]
+    if shape and body == cages[tag]:
+        log("FAIL: %s has no %s shape" % (tag, shape))
+        fails.append("chest shape " + shape)
+        return
     work = tempfile.mkdtemp(prefix="chest_", dir=core._work_root())
+    real = refit.mesh_shape
     try:
-        arch = run_case("vanilla", tag, inp, os.path.join(work, "out"))
+        if shape:  # every mesh of the outfit as if its .app carried the tag
+            refit.mesh_shape = lambda tags, rel, xl: shape
+        seen = []
+        arch = run_case("vanilla", tag, inp, os.path.join(work, "out"), seen)
+        if shape and not any("switches the chest to its" in m for m in seen):
+            log("FAIL: the log doesn't say the chest shape is used")
+            fails.append("chest shape log " + shape)
         if not arch:
             fails.append("chest " + os.path.basename(inp))
             return
@@ -1498,8 +1696,9 @@ def chest_test(core, wk, game, spec, run_case, barch, log, fails):
         bad = 0
         for name, parts in sorted(pos.items()):
             P = np.vstack(parts)
-            h = refit.skin_height(P, cages[tag])[0]
-            near = np.abs(h) < 0.06
+            h = refit.skin_height(P, body)[0]
+            # feet left out: the body shape has flat feet, a shoe for raised feet overlaps them by design
+            near = (np.abs(h) < 0.06) & (P[:, 1] >= refit.FEET_Y)
             band = near & (P[:, 1] > 1.22) & (P[:, 1] < 1.45)
             bad += int((h[near] < 0).sum())
             log(
@@ -1514,12 +1713,65 @@ def chest_test(core, wk, game, spec, run_case, barch, log, fails):
                     else "",
                 )
             )
+        # nipples: on Angel / EVE the clothing over the breast tips keeps the extra room (nipples poked through at 4 mm)
+        room = refit.nipple_room(body)
+        if room:
+            from scipy.spatial import cKDTree
+
+            allp = np.vstack([np.vstack(parts) for parts in pos.values()])
+            hs, qs, _ = refit.skin_height(allp, body)
+            tree = cKDTree(allp)
+            for tip in refit.breast_tips(body):
+                idx = np.array(
+                    [i for i in tree.query_ball_point(tip, 0.03) if abs(hs[i]) < 0.03],
+                    int,
+                )
+                if not len(idx):
+                    continue
+                dq = np.linalg.norm(qs[idx] - tip, axis=1)
+                need = 0.004 + room * np.clip(1 - (dq / 0.03) ** 2, 0, 1)
+                low = int((hs[idx] < need - 0.0005).sum())
+                log(
+                    "  around the breast tip: %d points, the closest %.1f mm over the skin; below the nipple room: %d"
+                    % (len(idx), hs[idx][np.argmin(dq)] * 1000, low)
+                )
+                bad += low
+        # the squashed shape (GarmentSupport morph) the game shows while a layer is worn over the garment
+        for g in glob.glob(
+            os.path.join(work, "p", "glb", "**", "*.glb"), recursive=True
+        ):
+            d, j, b = refit.load(g)
+            for mm in j["meshes"]:
+                names = (mm.get("extras") or {}).get("targetNames", [])
+                if (
+                    "LOD_1" not in (mm.get("name") or "")
+                    or "GarmentSupport" not in names
+                ):
+                    continue
+                for pr in mm["primitives"]:
+                    if not pr.get("targets"):
+                        continue
+                    P = refit.read(d, j, b, pr["attributes"]["POSITION"])
+                    D = refit.read(
+                        d,
+                        j,
+                        b,
+                        pr["targets"][names.index("GarmentSupport")]["POSITION"],
+                    )
+                    h = refit.skin_height(P + D, body)[0]
+                    n_in = int(((np.abs(h) < 0.06) & (h < 0)).sum())
+                    bad += n_in
+                    log(
+                        "  %-44s squashed shape (garment support): inside %d"
+                        % (os.path.basename(g)[:44], n_in)
+                    )
         if bad:
             log("FAIL: %d garment vertices inside the clothed body" % bad)
             fails.append("chest " + os.path.basename(inp))
         else:
             log("  clothed chest OK: nothing inside the body")
     finally:
+        refit.mesh_shape = real
         shutil.rmtree(work, ignore_errors=True)
 
 
@@ -1622,9 +1874,17 @@ def motion_test(core, wk, game, spec, barch, log, fails):
     moved = P + (BW[..., None] * Tj[BJ]).sum(1)
     tree0, tree1 = cKDTree(P), cKDTree(moved)
 
-    def inside(X, tree, B):
+    def inside(
+        X, tree, B
+    ):  # feet left out: shoes for raised feet overlap the flat feet by design
         dist, k = tree.query(X)
-        return int(((((X - B[k]) * N[k]).sum(1) < 0) & (dist < 0.06)).sum())
+        return int(
+            (
+                (((X - B[k]) * N[k]).sum(1) < 0)
+                & (dist < 0.06)
+                & (X[:, 1] >= refit.FEET_Y)
+            ).sum()
+        )
 
     work = tempfile.mkdtemp(prefix="motion_", dir=core._work_root())
     res = {}
@@ -1731,6 +1991,20 @@ def main(a):
         log("FAIL rig mod detection: %s" % (e,))
         fails.append("rigs")
     try:
+        check_install_rules(core)
+        log(
+            "install / uninstall rules (older '!!!' refit, changed files, plain errors) OK"
+        )
+    except (AssertionError, OSError) as e:
+        log("FAIL install / uninstall rules: %s" % (e,))
+        fails.append("install rules")
+    try:
+        check_tar(core)
+        log(".7z without 7-Zip (Windows tar), game folder one level off OK")
+    except (AssertionError, core.ToolError, RuntimeError) as e:
+        log("FAIL .7z without 7-Zip / game folder: %s" % (e,))
+        fails.append("tar")
+    try:
         check_dotnet(core)
         log("WolvenKit finds .NET 10 despite a wrong DOTNET_ROOT OK")
     except (AssertionError, core.ToolError) as e:
@@ -1809,8 +2083,9 @@ def main(a):
 
     seen = []  # log lines of the last run_case
 
-    def run_case(src, tag, inp, dest):
-        """One refit like the window does it, plus the safety check of the output. -> output archive or None."""
+    def run_case(src, tag, inp, dest, seen_out=None):
+        """One refit like the window does it, plus the safety check of the output. -> output archive or None.
+        seen_out: a list that gets the refit's log lines."""
         log("\n### case %s: %s -> %s" % (os.path.basename(inp), src, tag))
         seen[:] = []
         res = core.run_batch(
@@ -1823,6 +2098,8 @@ def main(a):
             src=src,
         )
         arch = res[0][1]
+        if seen_out is not None:
+            seen_out.extend(seen)
         if not arch:
             log("FAIL: no output (%s)" % res[0][2])
             fails.append(inp)
