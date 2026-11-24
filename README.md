@@ -98,6 +98,9 @@ need a hand-made refit. Always look at the result in game.
    - **Make clothes move with the body** (on by default since 1.9): tight clothes then follow the body exactly when V moves,
      also with rig or breast physics mods. Loose parts like a hanging skirt, and rigid parts like a knife or a bag,
      keep their own movement.
+   - **Also pack each refit into its own zip** (off at first): for Vortex or Mod Organizer 2. The zip
+     (`archive\pc\mod\<refit>.archive` inside) is saved next to the refit in the output folder; add it to your mod
+     manager like any other mod to turn the refit on and off there. Leave **Install** unticked then.
 6. Click **Refit**.
    - The **first time** it downloads WolvenKit (about 45 MB) and reads the body shapes from your game.
      This takes a minute or two and only happens once.
@@ -405,7 +408,8 @@ Output (`<Body>` = the target: `Angel`, `Eve`, `Vanilla`):
   `github.com/WolvenKit/WolvenKit/releases`, checked against its SHA-256
   (`a14eae46931251635256e7b209cd4aa998ae5039a5fbd506fefaab671bf7f451`) and unpacked to
   `%LOCALAPPDATA%\OutfitRefitter\wolvenkit\`. Its `appsettings.json` is set to export meshes without
-  materials and with all LODs. **WolvenKit...** in the window copies an existing WolvenKit install instead.
+  materials and with all LODs. **WolvenKit...** in the window copies an existing WolvenKit install instead
+  (since 1.9.2 also when you pick a folder up to 3 levels above `WolvenKit.CLI.exe`).
 - The game's `oo2ext_7_win64.dll` is copied from `<game>\bin\x64` to `%LOCALAPPDATA%`, where WolvenKit
   9.1.1 looks for it. Without it, WolvenKit silently uses a fallback that breaks big buffers.
 - Work runs at below-normal priority, so it can run while the game is open.

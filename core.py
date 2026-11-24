@@ -25,7 +25,7 @@ if (
     except OSError:
         DATA = _OLD_DATA
 
-VERSION = "1.9.1"
+VERSION = "1.9.2"
 
 
 def documents_dir():
@@ -407,18 +407,37 @@ def _wk_ready(exe, log):
     return exe
 
 
+def find_wk_cli(path):
+    """WolvenKit.CLI.exe in a picked folder or a few levels below it (people often pick the folder above the
+    unzipped one), or the picked .exe itself; None if there is none."""
+    if path.lower().endswith(".exe"):
+        return path if os.path.isfile(path) else None
+    root = os.path.abspath(path)
+    for d, subs, files in os.walk(root):
+        if "WolvenKit.CLI.exe" in files:
+            return os.path.join(d, "WolvenKit.CLI.exe")
+        if d[len(root) :].count(os.sep) >= 3:
+            subs[
+                :
+            ] = []  # ponytail: 3 levels deep is enough for 'Downloads\WolvenKit\WolvenKit.Console-x\'
+    return None
+
+
+WK_NOT_FOUND = (
+    "No WolvenKit.CLI.exe in %s.\n\nThe tool needs WolvenKit's console version (the file "
+    "WolvenKit.Console-<version>.zip, unzipped). The download of the WolvenKit app may not have it. You can also leave "
+    "this empty: the tool then downloads WolvenKit %s by itself.\n\n" + WK_URL
+)
+
+
 def ensure_wolvenkit(log, progress=lambda f: None, existing=None, retry=True):
     """WolvenKit.CLI in our data folder. existing: a WolvenKit folder the user already has (copied, never changed).
     Otherwise the official release zip is downloaded once and checked against its SHA-256."""
     exe = wk_exe()
     if existing:
-        src = (
-            existing
-            if existing.lower().endswith(".exe")
-            else os.path.join(existing, "WolvenKit.CLI.exe")
-        )
-        if not os.path.isfile(src):
-            raise ToolError("No WolvenKit.CLI.exe in %s." % existing)
+        src = find_wk_cli(existing)
+        if not src:
+            raise ToolError(WK_NOT_FOUND % (existing, WK_VERSION))
         if os.path.normcase(os.path.abspath(src)) != os.path.normcase(exe):
             log("Copying your WolvenKit from %s ..." % os.path.dirname(src))
             shutil.rmtree(os.path.dirname(exe), ignore_errors=True)
@@ -1434,6 +1453,7 @@ def run_batch(
     src="vanilla",
     replace_own=False,
     copy_moves=False,
+    make_zip=False,
 ):
     """Refit every input from body src (the body the outfits are made for) to body tag. -> list of (input, output
     archive or None, message, original missing).
@@ -1441,7 +1461,8 @@ def run_batch(
     body_files: {body tag: body file the user picked}.
     cancel: a threading.Event; once set, nothing more is installed and no further outfit is started.
     replace_own: also refit parts the outfit already ships a version for body tag of, replacing that version.
-    copy_moves: clothing close to the body gets the body's movement (skin weights), see refit.copy_weights."""
+    copy_moves: clothing close to the body gets the body's movement (skin weights), see refit.copy_weights.
+    make_zip: also pack each refit into its own zip (archive/pc/mod/...) for Vortex / Mod Organizer 2."""
     import refit
 
     cancel = cancel or threading.Event()
@@ -1487,6 +1508,12 @@ def run_batch(
                 copy_moves,
             )
             missing = bool(res) and original_missing(arcs, game)
+            if res and make_zip:
+                zp = os.path.splitext(res)[0] + ".zip"
+                with zipfile.ZipFile(zp + ".part", "w", zipfile.ZIP_DEFLATED) as z:
+                    z.write(res, "archive/pc/mod/" + os.path.basename(res))
+                os.replace(zp + ".part", zp)
+                log("Zip for Vortex / Mod Organizer 2: %s" % os.path.basename(zp))
             if res and do_install:
                 with INSTALL_LOCK, _install_errors(log, res):
                     if cancel.is_set():

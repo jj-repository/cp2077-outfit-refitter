@@ -104,6 +104,7 @@ Steps, in order
 6. Install: tick 'Install into the game when done' if the tool should put the refit straight into your game. If the original outfit is not in your game yet, the tool installs it too, from the same download. Leave it unticked to only save the file in the output folder; then nothing goes into your game.
    Some outfit downloads already contain a ready-made version for the body you picked under 'Your body mod' (for example an Angel version made by the outfit's author). The tool leaves that version alone and only refits the parts that have none. If the author's version doesn't fit well (for example it clips), tick 'Replace the outfit's own version': the tool then refits those parts too, and its version is used instead. Uninstall the refit to get the outfit's own version back.
    'Make clothes move with the body': tight clothes then follow the body exactly when V moves, also with rig or breast physics mods (the log tells you if you have such mods). Loose parts like a hanging skirt keep their own movement. It's on by default; untick it only if a part moves wrong (for example a skirt sticks to the legs).
+   'Also pack each refit into its own zip': for Vortex or Mod Organizer 2. The zip is saved next to the refit in the output folder; add it to your mod manager like any other mod, then you can turn the refit on and off there. Leave 'Install into the game' unticked then.
    Not sure what an option does? Move the mouse over the small '?' next to it.
 
 7. Click 'Refit'. The bar and the log below show the progress. The first run takes longer: the tool downloads WolvenKit (about 45 MB) and reads the body shapes once. While it runs, the button says 'Stop': click it to stop; nothing is kept from the outfit it was working on.
@@ -127,7 +128,7 @@ Good to know
 - Layered outfits: when something is worn over a piece, the game squashes that piece toward the body. The tool fits that squashed shape to your body too.
 - Angel and EVE show nipples also under clothes. Refits leave a little more room over the breast tips so they don't poke through.
 - Hyst says that rig mods which change the breast area (for example "All the Rigs") and breast physics mods make some clothes clip with Angel and EVE, mostly when V moves. The tool tells you in the log if you have such mods; keep 'Make clothes move with the body' ticked so tight clothes follow those movements.
-- 'WolvenKit...' lets you use a WolvenKit you already have instead of downloading it.
+- 'WolvenKit...' lets you use a WolvenKit you already have instead of downloading it. Pick the folder of WolvenKit's console version (WolvenKit.Console-<version>.zip, unzipped) or a folder above it; the tool finds WolvenKit.CLI.exe inside. It's copied on the next refit.
 
 Common problems
 - The game folder isn't found: click 'Change...' and pick your 'Cyberpunk 2077' folder. For the Xbox app it's XboxGames\\Cyberpunk 2077\\Content.
@@ -283,6 +284,14 @@ class App:
             text="Make clothes move with the body (helps with rig / breast physics mods)",
             variable=self.moves,
         ).pack(side="left")
+        o4 = ttk.Frame(root)
+        o4.pack(fill="x", **pad)
+        self.zip = tk.BooleanVar(value=self.s.get("make_zip", False))
+        ttk.Checkbutton(
+            o4,
+            text="Also pack each refit into its own zip (for Vortex / Mod Organizer 2)",
+            variable=self.zip,
+        ).pack(side="left")
         for fr, txt in (
             (
                 o,
@@ -301,6 +310,12 @@ class App:
                 o3,
                 "Clothes close to the body move along with it, like skin. Keep this ticked. "
                 "Only untick it if something moves wrong, for example a skirt sticks to the legs.",
+            ),
+            (
+                o4,
+                "Puts a zip next to each refit in the output folder. Add that zip to Vortex or Mod Organizer 2 "
+                "like any other mod: then you can turn the refit on and off there. Leave 'Install into the game' "
+                "unticked if you use a mod manager.",
             ),
         ):
             tip_icon(fr, txt)
@@ -352,6 +367,7 @@ class App:
             (self.inst, "install box "),
             (self.own, "replace own version box "),
             (self.moves, "move with the body box "),
+            (self.zip, "zip box "),
         ):
             traces.append(
                 (
@@ -430,6 +446,7 @@ class App:
             install=self.inst.get(),
             replace_own=self.own.get(),
             move_with_body=self.moves.get(),
+            make_zip=self.zip.get(),
         )
         try:
             core.save_settings(self.s)
@@ -578,9 +595,11 @@ class App:
             title="Choose a folder with WolvenKit.CLI.exe (optional, otherwise it is downloaded)"
         )
         if d:
-            if not os.path.isfile(os.path.join(d, "WolvenKit.CLI.exe")):
-                self.msg("error", "No WolvenKit.CLI.exe in that folder.")
+            exe = core.find_wk_cli(d)
+            if not exe:
+                self.msg("error", core.WK_NOT_FOUND % (d, core.WK_VERSION))
                 return
+            d = os.path.dirname(exe)
             self.s["wk_existing"] = os.path.normpath(d)
             self.rec("action", "WolvenKit folder picked: %s" % d)
             self.save()
@@ -632,6 +651,7 @@ class App:
                 install=self.inst.get(),
                 replace_own=self.own.get(),
                 copy_moves=self.moves.get(),
+                make_zip=self.zip.get(),
                 **{"from": self.src_tag()},
             )
             text = support.build(
@@ -770,7 +790,7 @@ class App:
         self.save()
         self.rec(
             "action",
-            "Refit started: %d outfit(s), made for %s, body %s, install %s, replace own version %s, move with the body %s, game %s, "
+            "Refit started: %d outfit(s), made for %s, body %s, install %s, replace own version %s, move with the body %s, zip %s, game %s, "
             "output %s"
             % (
                 len(files),
@@ -779,6 +799,7 @@ class App:
                 "ticked" if self.inst.get() else "unticked",
                 "ticked" if self.own.get() else "unticked",
                 "ticked" if self.moves.get() else "unticked",
+                "ticked" if self.zip.get() else "unticked",
                 self.game.get(),
                 self.out_dir(),
             ),
@@ -799,6 +820,7 @@ class App:
             self.src_tag(),
             self.own.get(),
             self.moves.get(),
+            self.zip.get(),
         )
         # the worker gets only the queue and plain values, never the window objects (Tk is not thread-safe)
         self.worker = threading.Thread(
@@ -820,6 +842,7 @@ class App:
         src,
         own,
         moves,
+        make_zip,
     ):
         put = lambda m: q.put(("log", m))
         try:
@@ -837,6 +860,7 @@ class App:
                 src,
                 own,
                 moves,
+                make_zip,
             )
             ok = [r for r in res if r[1]]
             put("")
@@ -941,6 +965,7 @@ def drive(
     replace_own=False,
     copy_moves=False,
     stop_on=None,
+    make_zip=False,
 ):
     """Self-test: open the real window, drop an outfit on it, pick the body (and game folder, body file, Install
     tick, 'Replace the outfit's own version' tick), press Refit, wait for the result. close_on: text; when it shows up in the log, the window gets a real
@@ -969,6 +994,7 @@ def drive(
     app.inst.set(install)
     app.own.set(replace_own)
     app.moves.set(copy_moves)
+    app.zip.set(make_zip)
     app.body.set(core.body_name(tag))
     app.show_body()
     t0 = time.time()

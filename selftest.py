@@ -35,7 +35,7 @@ with refits you trust (e.g. ones made by hand).
     real window on two fake games made in DIR (with / without ArchiveXL etc.), incl. a restart (previous session).
 Exit code 0 = everything passed."""
 
-import glob, os, shutil, sys, tempfile, traceback
+import glob, os, re, shutil, sys, tempfile, traceback, zipfile
 
 
 def opt_all(a, k):
@@ -809,9 +809,24 @@ def gui_install_tests(core, gui, a, log, fails):
         log("\n## %s" % name)
         s0 = snap(game)
         # 3. Install unticked, original missing: nothing goes into the game, warning in the log and the summary
-        st = gui.drive(inp, "angel", out, log, game=game, install=False, body_file=body)
+        st = gui.drive(
+            inp, "angel", out, log, game=game, install=False, body_file=body, make_zip=True
+        )
         warn = core.MISSING_TEXT % name
         check("unticked: refit finished", st["ok"])
+        # zip ticked: a zip with the refit at archive/pc/mod/ for Vortex / MO2, next to the refit
+        zl = [m.split(": ", 1)[1] for m in st["log"] if m.startswith("Zip for Vortex")]
+        zn = []
+        if zl:
+            with zipfile.ZipFile(os.path.join(out, zl[0])) as z:
+                zn = z.namelist()
+        check(
+            "zip: has the refit at archive/pc/mod/",
+            len(zn) == 1
+            and zn[0] == "archive/pc/mod/" + zl[0][:-4] + ".archive"
+            and os.path.isfile(os.path.join(out, zl[0][:-4] + ".archive")),
+            "%s %s" % (zl, zn),
+        )
         check("unticked: game folder unchanged", snap(game) == s0, new_files(s0))
         check(
             "unticked: warning in log and in summary",
@@ -1502,10 +1517,11 @@ def support_tests(core, gui, a, log, fails):
         )
         check(
             "report A: this PC (WolvenKit start test, antivirus, folders, unpacking, store)",
-            all(
+            # any version: the self-test also runs with a picked WolvenKit (10.0 beta)
+            re.search(r"WolvenKit start test: \d+\.\d+\.\d+", A)
+            and all(
                 s in A
                 for s in (
-                    "WolvenKit start test: 9.1.1",
                     "Antivirus: ",
                     "Data folder: writable yes",
                     "Unpacking .7z / .rar: ",
@@ -2076,6 +2092,10 @@ def main(a):
     core.ensure_oodle(game)
     wk = core.ensure_wolvenkit(log, lambda f: None, opt(a, "--wolvenkit"))
     log("WolvenKit OK: %s" % wk)
+    # 'WolvenKit...' with the folder above WolvenKit's own (1.9.2): found below it, not refused
+    if core.ensure_wolvenkit(log, lambda f: None, os.path.dirname(os.path.dirname(wk))) != wk:
+        log("FAIL: WolvenKit not found below the picked folder")
+        fails.append("wolvenkit parent folder")
     for o in opt_all(a, "--own-reader"):
         log("\n### own mesh reader on %s" % os.path.basename(o))
         work = tempfile.mkdtemp(prefix="own_", dir=core._work_root())

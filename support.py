@@ -603,6 +603,10 @@ def build(session, settings, game, out, outfits, refits):
             "Make clothes move with the body: %s"
             % ("ticked" if settings.get("copy_moves") else "not ticked")
         )
+        L.append(
+            "Zip for Vortex / MO2: %s"
+            % ("ticked" if settings.get("make_zip") else "not ticked")
+        )
         L.append("Output folder: %s" % out)
         L.append("Game folder: %s" % game)
         wk = core.wk_exe()
