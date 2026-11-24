@@ -12,8 +12,8 @@ with refits you trust (e.g. ones made by hand).
 --layers TAG=OUTFIT=STEM,STEM,...: garment layers (mesh stems inner -> outer): outer-layer vertices below an inner
     layer in 1.5 (recomputed) and in the output (must be 0).
 --chest TAG=OUTFIT: garment vertices inside the body as the game shows it in clothes (must be 0).
-    TAG:SHAPE=OUTFIT as if the outfit carried chest shape tag SHAPE; TAG:notop=OUTFIT with 'Worn without a top'
-    (checked against the uncovered chest).
+    TAG:SHAPE=OUTFIT as if the outfit carried chest shape tag SHAPE; TAG:notop=OUTFIT a normal refit checked
+    against the uncovered chest (every Angel / EVE refit clears both chest shapes).
 --replace-own TAG=OUTFIT: an outfit with its own TAG version: left alone without the option, refit into a '!!!'
     archive with it.
 --motion TAG=OUTFIT: 'Make clothes move with the body': the chest bones move 2 cm, nothing may end up inside.
@@ -1693,7 +1693,7 @@ def chest_test(core, wk, game, spec, run_case, barch, log, fails):
     tag, _, shape = tag.partition(":")
     no_top = (
         shape == "notop"
-    )  # 'Worn without a top': checked against the body's uncovered chest
+    )  # a normal refit checked against the body's uncovered chest: every refit must clear it too
     if no_top:
         shape = core.bodies()["bodies"][tag].get("uncovered", "")
     log(
@@ -1714,15 +1714,10 @@ def chest_test(core, wk, game, spec, run_case, barch, log, fails):
         ):  # every mesh of the outfit as if its .app carried the tag
             refit.mesh_shape = lambda tags, rel, xl: shape
         seen = []
-        arch = run_case(
-            "vanilla", tag, inp, os.path.join(work, "out"), seen, no_top=no_top
-        )
-        if no_top and not any(
-            "'Worn without a top': fit to" in m and "normal shape" not in m
-            for m in seen
-        ):
-            log("FAIL: the log doesn't say the uncovered chest is used")
-            fails.append("chest no top log")
+        arch = run_case("vanilla", tag, inp, os.path.join(work, "out"), seen)
+        if no_top and not any("Fit to both of" in m for m in seen):
+            log("FAIL: the log doesn't say both chest shapes are used")
+            fails.append("chest both log")
         if (
             shape
             and not no_top

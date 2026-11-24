@@ -155,15 +155,34 @@ def push_out(Q, shp, off):
     return bad
 
 
-def move(P, src, tgt, off=0.004):
+def move(P, src, tgt, off=0.004, also=None):
     """Move every garment vertex (glb space) by the inverse-distance-weighted displacement of its 8 nearest
     source-body vertices, then push vertices that ended up inside the target body out to `off` m above the skin
-    (only within 6 cm of it). -> (new positions, number pushed out)."""
+    (only within 6 cm of it). also = a second shape of the target body (its uncovered chest) the garment must clear
+    too: the game can show both chests at once. -> (new positions, number pushed out)."""
     stree, disp, ttree, T, TN = field(src, tgt)
     dist, nb = stree.query(P, k=8)
     w = 1.0 / np.maximum(dist, 1e-4) ** 2
     w /= w.sum(1, keepdims=True)
     Q = P + (disp[nb] * w[..., None]).sum(1)
+    bad = settle(Q, tgt, off)
+    if also:
+        bad |= settle(Q, also, off)
+    # shoes: the body shape has flat feet, but a shoe for raised feet (heels) has its sole and inside where the flat
+    # foot is. Vertices that were already inside the source body there stay where the field put them (the feet are
+    # the same on every body: a refit moves them 1-4 mm). ponytail: below 35 cm, any depth.
+    low = np.where(P[:, 1] < FEET_Y)[0]
+    if len(low):
+        was = low[skin_height(P[low], src)[0] < 0]
+        Q[was] = (P + (disp[nb] * w[..., None]).sum(1))[was]
+        bad[was] = False
+    return Q, int(bad.sum())
+
+
+def settle(Q, tgt, off):
+    """Push the vertices of Q (in place) that are inside body shape tgt, or closer than `off` m to its skin, out to
+    `off` m above it, with extra room over the breast tips. -> mask of the moved vertices."""
+    ttree, T, TN = shape(tgt)
     bad = push_out(Q, (ttree, T, TN), off)
     # the nearest body vertex's normal misses curved spots (EVE's crotch: up to 2.6 mm inside after the push above),
     # so vertices close to the skin are checked again against the exact surface and lifted to `off` above it
@@ -195,15 +214,34 @@ def move(P, src, tgt, off=0.004):
             low = (h < want) & (h > -0.015)
             Q[near[low]] = q[low] + n[low] * want[low, None]
             bad[near[low]] = True
-    # shoes: the body shape has flat feet, but a shoe for raised feet (heels) has its sole and inside where the flat
-    # foot is. Vertices that were already inside the source body there stay where the field put them (the feet are
-    # the same on every body: a refit moves them 1-4 mm). ponytail: below 35 cm, any depth.
-    low = np.where(P[:, 1] < FEET_Y)[0]
-    if len(low):
-        was = low[skin_height(P[low], src)[0] < 0]
-        Q[was] = (P + (disp[nb] * w[..., None]).sum(1))[was]
-        bad[was] = False
-    return Q, int(bad.sum())
+    # under the breast: in animations the soft lower breast swings out further than a garment 4 mm over it follows
+    # (tested in game: small holes there that move with the animation). The floor rises by the body's
+    # 'underbreast_room' over the lower breast.
+    ub = bodies()["bodies"].get(body_key(tgt), {}).get("underbreast_room", 0) / 1000.0
+    if ub:
+        tips = breast_tips(tgt)
+        sel = np.where(np.linalg.norm(Q[:, None] - tips[None], axis=2).min(1) < 0.12)[0]
+        if len(sel):
+            h, q, n = skin_height(Q[sel], tgt)
+            dx = np.abs(np.abs(q[:, 0])[:, None] - np.abs(tips[None, :, 0])).min(1)
+            dy = tips[:, 1].mean() - q[:, 1]  # > 0: below the tips
+            front = q[:, 2] < tips[:, 2].max() + 0.06
+            # full room from the tip to 7 cm below it and 4 cm sideways, fading out over 2-3 cm
+            f = (
+                np.clip((0.07 - dx) / 0.03, 0, 1)
+                * np.clip((dy + 0.01) / 0.02, 0, 1)
+                * np.clip((0.09 - dy) / 0.02, 0, 1)
+            )
+            want = off + ub * f
+            low = front & (f > 0) & (h < want) & (h > -0.015)
+            Q[sel[low]] = q[low] + n[low] * want[low, None]
+            bad[sel[low]] = True
+    return bad
+
+
+def body_key(tgt):
+    """bodies.json key of the body whose shape tgt is (its cage folder name)."""
+    return os.path.basename(os.path.dirname(tgt.split(";")[0].split("|")[0]))
 
 
 FEET_Y = 0.35  # m above the ground: up to here, a different feet state (flat / raised) is normal
@@ -546,13 +584,13 @@ def copy_weights(d, j, b, pr, Q, tgt, near=0.015, far=0.04):
     return int(ok.sum())
 
 
-def refit_parts(parts, src, tgt, inner=None):
+def refit_parts(parts, src, tgt, inner=None, also=None):
     """move() + layer_push() for the parts of one mesh: parts = [(LOD key, positions)], inner = {LOD key: inner layer
     positions} (a LOD the inner layers lack uses their LOD 1). -> ([new positions], pushed out of the skin, lifted
     over the inner layers)."""
     out, pushed, lifted = [], 0, 0
     for lod, P in parts:
-        Q, n = move(P, src, tgt)
+        Q, n = move(P, src, tgt, also=also)
         if inner:
             lifted += layer_push(Q, inner.get(lod, inner.get(1)), tgt)
         out.append(Q)
@@ -566,7 +604,7 @@ def lod_of(name):
     return int(m.group(1)) if m else 1
 
 
-def refit_glb(gar, out, src, tgt, inner=None, weights=False):
+def refit_glb(gar, out, src, tgt, inner=None, weights=False, also=None):
     """refit_parts() applied to a WolvenKit glb export. Only POSITION bytes change (and with weights=True the skin
     weights near the body, copy_weights): indices, UVs and normals stay identical. The GarmentSupport morph (the
     squashed shape the game shows while another layer is worn over the garment) is refit too: its delta is made
@@ -584,14 +622,14 @@ def refit_glb(gar, out, src, tgt, inner=None, weights=False):
     }
     acc = [(lod, pr["attributes"]["POSITION"]) for lod, pr in prims]
     parts = [(lod, read(d, j, b, ai)) for lod, ai in acc]
-    Qs, inside, lifted = refit_parts(parts, src, tgt, inner)
+    Qs, inside, lifted = refit_parts(parts, src, tgt, inner, also)
     copied = gs = 0
     for (_, ai), (_, pr), (_, P), Q in zip(acc, prims, parts, Qs):
         if id(pr) in gsk and gsk[id(pr)] < len(pr["targets"]):
             ti = pr["targets"][gsk[id(pr)]].get("POSITION")
             if ti is not None:
                 D = read(d, j, b, ti)
-                write(d, j, b, ti, move(P + D, src, tgt)[0] - Q)
+                write(d, j, b, ti, move(P + D, src, tgt, also=also)[0] - Q)
                 gs += 1
         write(d, j, b, ai, Q)
         if weights:
@@ -1318,7 +1356,6 @@ def refit_mod(
     origin=None,
     replace_own=False,
     copy_moves=False,
-    no_top=False,
 ):
     """arcs: the outfit's .archive files, made for body src_body; refit to body tgt (body tags; cages: {tag: glbs}).
     origin: files whose surroundings hold the outfit's r6\\tweaks .yaml (default arcs), for the garment layers.
@@ -1327,8 +1364,6 @@ def refit_mod(
     copy_moves: clothing close to the body gets the body's skin weights (copy_weights), so it moves with the body,
     also with rig / breast physics mods. Meshes written without WolvenKit's import (own reader, rebuilt big
     buffers) keep their own weights; the log says so.
-    no_top: the outfit is worn with nothing over the chest (pasties, a harness): fit to each body's uncovered chest
-    ('uncovered' in bodies.json) unless the mesh switches the chest to a shape itself.
     -> path of the written refit archive, or None if nothing needed a refit.
     Raises ToolError when nothing could be refit or the final safety check fails."""
     sx, tx = xl_name(src_body), xl_name(tgt)
@@ -1473,7 +1508,7 @@ def refit_mod(
                     if s in slots
                 )
             )
-    no_top_said = []
+    both_said = []
     worn = []  # (slot, [(LOD, refit positions)]) of the refit garments with a layer slot
     done, glbs = [], {}
 
@@ -1498,28 +1533,22 @@ def refit_mod(
             continue
         tag = mesh_shape(shape_tags, s, sx) or mesh_shape(shape_tags, t, tx)
 
-        def cage_for(b):
-            c = shape_cage(cages[b], b, tag)
-            if (
-                no_top and c == cages[b]
-            ):  # untagged, or this body lacks the tag: its uncovered chest
-                c = shape_cage(cages[b], b, bodies()["bodies"][b].get("uncovered"))
-            return c
-
-        c_src, c_tgt = cage_for(src_body), cage_for(tgt)
-        if no_top and not no_top_said:
-            no_top_said.append(1)
-            unc = bodies()["bodies"][tgt].get("uncovered")
+        c_src, c_tgt = (
+            shape_cage(cages[src_body], src_body, tag),
+            shape_cage(cages[tgt], tgt, tag),
+        )
+        # untagged (the game's own chest): also clear the uncovered chest (the character creator's 'Big' chest).
+        # In game both show under clothes (Angel: the natural chest is lower at the bottom, the normal one fuller at
+        # the front), so a fit to either one alone pokes through where the other sticks out (tested in game).
+        also = None
+        if c_tgt == cages[tgt]:
+            also = shape_cage(cages[tgt], tgt, bodies()["bodies"][tgt].get("uncovered"))
+            also = also if also != cages[tgt] else None
+        if also and not both_said:
+            both_said.append(1)
             log(
-                "  'Worn without a top': "
-                + (
-                    "%s's chest looks the same with or without a top" % body_name(tgt)
-                    if not unc
-                    else "fit to %s's uncovered chest" % body_name(tgt)
-                    if shape_cage(cages[tgt], tgt, unc) != cages[tgt]
-                    else "%s's uncovered chest is not in your body files: the normal shape is used"
-                    % body_name(tgt)
-                )
+                "  Fit to both of %s's chest shapes (under clothes and bare), with extra room under the breasts"
+                % body_name(tgt)
             )
         if tag and (c_src != cages[src_body] or c_tgt != cages[tgt]):
             log(
@@ -1563,7 +1592,7 @@ def refit_mod(
         if own:  # split by render chunk: each chunk's LOD meets the same LOD of the inner layers
             cut = np.cumsum([n for _, _, n in own.spans])[:-1]
             parts = list(zip(own.lods, np.split(pts, cut)))
-            Qs, pushed, lifted = refit_parts(parts, c_src, c_tgt, inner)
+            Qs, pushed, lifted = refit_parts(parts, c_src, c_tgt, inner, also)
             try:
                 data = own_refit(own, from_glb_space(np.vstack(Qs)))
             except Exception as e:
@@ -1593,7 +1622,7 @@ def refit_mod(
         shutil.copy(g, g2)
         try:
             nv, pushed, lifted, parts, copied, gs = refit_glb(
-                g, tglb, c_src, c_tgt, inner, copy_moves
+                g, tglb, c_src, c_tgt, inner, copy_moves, also
             )
         except Exception as e:  # one odd mesh (or too little memory for it) never costs the rest of the outfit
             skipped.append(

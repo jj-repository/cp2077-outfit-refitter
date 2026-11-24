@@ -25,7 +25,7 @@ if (
     except OSError:
         DATA = _OLD_DATA
 
-VERSION = "1.9"
+VERSION = "1.9.1"
 
 
 def documents_dir():
@@ -1434,7 +1434,6 @@ def run_batch(
     src="vanilla",
     replace_own=False,
     copy_moves=False,
-    no_top=False,
 ):
     """Refit every input from body src (the body the outfits are made for) to body tag. -> list of (input, output
     archive or None, message, original missing).
@@ -1442,8 +1441,7 @@ def run_batch(
     body_files: {body tag: body file the user picked}.
     cancel: a threading.Event; once set, nothing more is installed and no further outfit is started.
     replace_own: also refit parts the outfit already ships a version for body tag of, replacing that version.
-    copy_moves: clothing close to the body gets the body's movement (skin weights), see refit.copy_weights.
-    no_top: the outfits are worn with nothing over the chest: fit to the body's uncovered chest."""
+    copy_moves: clothing close to the body gets the body's movement (skin weights), see refit.copy_weights."""
     import refit
 
     cancel = cancel or threading.Event()
@@ -1487,7 +1485,6 @@ def run_batch(
                 else arcs,
                 replace_own,
                 copy_moves,
-                no_top,
             )
             missing = bool(res) and original_missing(arcs, game)
             if res and do_install:
