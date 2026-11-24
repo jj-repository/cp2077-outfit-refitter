@@ -338,6 +338,14 @@ Fit details (1.8):
   vertices up to 25 mm inside the vanilla body in the original). Below 35 cm, vertices that were inside the source
   body stay where the field puts them (a refit moves the feet 1-4 mm); before, 4,990 of them were pushed out.
 
+Details (1.9.2):
+- **Zip per refit** (`make_zip`, GUI box, CLI `--zip`): `run_batch` writes `<refit>.zip` next to the refit with the
+  archive at `archive/pc/mod/` (written as `.part`, then renamed).
+- **WolvenKit...**: `core.find_wk_cli` accepts the .exe, its folder, or a folder up to 3 levels above it; otherwise
+  `WK_NOT_FOUND` names the console download. Same check in the GUI and in `ensure_wolvenkit`.
+- WolvenKit **10.0.0-beta.1** (`--wolvenkit <folder>`): the full self-test passes (source and exe); its
+  `appsettings.json` keys match ours. 9.1.1 stays the downloaded, checksum-pinned version.
+
 Fit details (1.9.1):
 - **Both chest shapes**: full body + the character creator's *Big* chest morph (`t0_000_pwa_base__full.morphtarget`,
   `breast_big`) is identical (0.0 mm) to Angel's `femv_boobs_natural` and EVE's `femv_boobs_nipple` mesh
