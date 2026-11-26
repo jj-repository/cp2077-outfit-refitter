@@ -104,12 +104,14 @@ Steps, in order
 6. Install: tick 'Install into the game when done' if the tool should put the refit straight into your game. If the original outfit is not in your game yet, the tool installs it too, from the same download. Leave it unticked to only save the file in the output folder; then nothing goes into your game.
    Some outfit downloads already contain a ready-made version for the body you picked under 'Your body mod' (for example an Angel version made by the outfit's author). The tool leaves that version alone and only refits the parts that have none. If the author's version doesn't fit well (for example it clips), tick 'Replace the outfit's own version': the tool then refits those parts too, and its version is used instead. Uninstall the refit to get the outfit's own version back.
    'Make clothes move with the body': tight clothes then follow the body exactly when V moves, also with rig or breast physics mods (the log tells you if you have such mods). Loose parts like a hanging skirt keep their own movement. It's on by default; untick it only if a part moves wrong (for example a skirt sticks to the legs).
+   'Adjust room at the chest': only for when the chest still pokes through after a refit, or a top sits too loose there. Tick it, pick a value from -2.0 to +6.0 mm and refit the outfit again. Plus makes the clothing looser over the chest, minus makes it tighter than the tool's normal fit; nothing else changes. Tighter can clip when V moves. Unticked, or 0.0, is the normal fit.
+   'Move pasties up / down': only for pasties and other small pieces that sit on the breast. If they sit too high or too low after a refit, tick it, pick how far to move them (from -30 to +30 mm, plus is up) and refit again. They slide along the skin and stay as close to it as before; tops, bras and everything else are not changed. The log says which pieces were moved. Unticked, or 0, is the normal place.
    'Also pack each refit into its own zip': for Vortex or Mod Organizer 2. The zip is saved next to the refit in the output folder; add it to your mod manager like any other mod, then you can turn the refit on and off there. Leave 'Install into the game' unticked then.
    Not sure what an option does? Move the mouse over the small '?' next to it.
 
 7. Click 'Refit'. The bar and the log below show the progress. The first run takes longer: the tool downloads WolvenKit (about 45 MB) and reads the body shapes once. While it runs, the button says 'Stop': click it to stop; nothing is kept from the outfit it was working on.
 
-8. Done. If you didn't tick Install, click 'Open output folder' and copy the .archive file(s) into <game folder>\\archive\\pc\\mod. The original outfit must be in your game as well; the refit only reshapes it. The log tells you if it is missing.
+8. Done. If you didn't tick Install, click 'Open output folder' and copy the .archive file(s), and the .xl file of the same name when there is one, into <game folder>\\archive\\pc\\mod. The original outfit must be in your game as well; the refit only reshapes it. The log tells you if it is missing.
 
 Undo
 'Uninstall...' lists what this tool put into your game: refits, and original outfits it installed because they were missing. Select what to remove. Or delete the AngelRefit_ / EveRefit_ / VanillaRefit_ file from archive\\pc\\mod yourself. If a file was changed since the tool installed it (for example you installed the same mod again with a mod manager), the tool leaves it alone and tells you.
@@ -292,6 +294,31 @@ class App:
             text="Also pack each refit into its own zip (for Vortex / Mod Organizer 2)",
             variable=self.zip,
         ).pack(side="left")
+        # 'Adjust room at the chest': a tick box and a list of values; the list is only active when ticked
+        # (its state follows the box in poll(), never from inside a Tk callback)
+        o5 = ttk.Frame(root)
+        o5.pack(fill="x", **pad)
+        self.room_on = tk.BooleanVar(value=bool(self.s.get("chest_room_on", False)))
+        ttk.Checkbutton(o5, text="Adjust room at the chest", variable=self.room_on).pack(side="left")
+        self.room = tk.StringVar(value="%+.1f" % core.chest_room_value(True, self.s.get("chest_room", 0.0)))
+        self.room_box = ttk.Combobox(
+            o5, textvariable=self.room, values=["-2.0", "-1.5", "-1.0", "-0.5", "+0.0", "+0.5", "+1.0", "+1.5", "+2.0", "+2.5", "+3.0", "+3.5", "+4.0", "+4.5", "+5.0", "+5.5", "+6.0"], width=6, state="disabled"
+        )
+        self.room_box.pack(side="left", padx=(6, 2))
+        ttk.Label(o5, text="mm").pack(side="left")
+        self.room_state = None
+        # 'Move pasties up / down': the same pattern
+        o6 = ttk.Frame(root)
+        o6.pack(fill="x", **pad)
+        self.pasties_on = tk.BooleanVar(value=bool(self.s.get("pasties_on", False)))
+        ttk.Checkbutton(o6, text="Move pasties up / down", variable=self.pasties_on).pack(side="left")
+        self.pasties = tk.StringVar(value="%+d" % core.pasties_value(True, self.s.get("pasties_shift", 0)))
+        self.pasties_box = ttk.Combobox(
+            o6, textvariable=self.pasties, values=["%+d" % v for v in range(-30, 31)], width=6, state="disabled"
+        )
+        self.pasties_box.pack(side="left", padx=(6, 2))
+        ttk.Label(o6, text="mm (+ is up)").pack(side="left")
+        self.pasties_state = None
         for fr, txt in (
             (
                 o,
@@ -316,6 +343,20 @@ class App:
                 "Puts a zip next to each refit in the output folder. Add that zip to Vortex or Mod Organizer 2 "
                 "like any other mod: then you can turn the refit on and off there. Leave 'Install into the game' "
                 "unticked if you use a mod manager.",
+            ),
+            (
+                o5,
+                "Only if the chest still pokes through (or a top sits too loose) after a refit: tick it, pick a "
+                "value and refit again. Plus = looser (more room over the chest), minus = tighter than the tool's "
+                "normal fit. Only the chest area changes. Tighter can clip when V moves; the clothing never ends "
+                "up inside the skin of the standing body. Unticked or 0.0 = the normal fit.",
+            ),
+            (
+                o6,
+                "Only for pasties and other small pieces that sit on the breast: if they sit too high or too low "
+                "after a refit, tick it, pick how far to move them (plus = up, minus = down) and refit again. "
+                "They slide along the skin and stay as close to it as before. Tops, bras and everything else "
+                "are not changed; the log says which pieces were moved. Unticked or 0 = the normal place.",
             ),
         ):
             tip_icon(fr, txt)
@@ -368,6 +409,8 @@ class App:
             (self.own, "replace own version box "),
             (self.moves, "move with the body box "),
             (self.zip, "zip box "),
+            (self.room_on, "room at the chest box "),
+            (self.pasties_on, "move pasties box "),
         ):
             traces.append(
                 (
@@ -447,6 +490,10 @@ class App:
             replace_own=self.own.get(),
             move_with_body=self.moves.get(),
             make_zip=self.zip.get(),
+            chest_room_on=self.room_on.get(),
+            chest_room=core.chest_room_value(True, self.room.get()),
+            pasties_on=self.pasties_on.get(),
+            pasties_shift=core.pasties_value(True, self.pasties.get()),
         )
         try:
             core.save_settings(self.s)
@@ -652,6 +699,8 @@ class App:
                 replace_own=self.own.get(),
                 copy_moves=self.moves.get(),
                 make_zip=self.zip.get(),
+                chest_room=self.room_mm(),
+                pasties_shift=self.pasties_mm(),
                 **{"from": self.src_tag()},
             )
             text = support.build(
@@ -790,7 +839,7 @@ class App:
         self.save()
         self.rec(
             "action",
-            "Refit started: %d outfit(s), made for %s, body %s, install %s, replace own version %s, move with the body %s, zip %s, game %s, "
+            "Refit started: %d outfit(s), made for %s, body %s, install %s, replace own version %s, move with the body %s, zip %s, room at the chest %s, move pasties %s, game %s, "
             "output %s"
             % (
                 len(files),
@@ -800,6 +849,8 @@ class App:
                 "ticked" if self.own.get() else "unticked",
                 "ticked" if self.moves.get() else "unticked",
                 "ticked" if self.zip.get() else "unticked",
+                "%+.1f mm" % self.room_mm() if self.room_mm() else "not adjusted",
+                "%+d mm" % self.pasties_mm() if self.pasties_mm() else "no",
                 self.game.get(),
                 self.out_dir(),
             ),
@@ -821,6 +872,8 @@ class App:
             self.own.get(),
             self.moves.get(),
             self.zip.get(),
+            self.room_mm(),
+            self.pasties_mm(),
         )
         # the worker gets only the queue and plain values, never the window objects (Tk is not thread-safe)
         self.worker = threading.Thread(
@@ -843,6 +896,8 @@ class App:
         own,
         moves,
         make_zip,
+        chest_room=0.0,
+        pasties_shift=0,
     ):
         put = lambda m: q.put(("log", m))
         try:
@@ -861,6 +916,8 @@ class App:
                 own,
                 moves,
                 make_zip,
+                chest_room,
+                pasties_shift,
             )
             ok = [r for r in res if r[1]]
             put("")
@@ -870,8 +927,11 @@ class App:
             )
             if ok and not inst:
                 put(
-                    "To use them, copy the .archive files into <game>\\archive\\pc\\mod (or tick 'Install')."
+                    "To use them, copy the .archive files (and the .xl files next to them) into <game>\\archive\\pc\\mod (or tick 'Install')."
                 )
+            for r in res:
+                if r[2].startswith(("incomplete: ", "nothing could be refit: ")):
+                    put("%s is not complete: %s" % (core.shown_name(r[0]), r[2].split(": ", 1)[1]))
             for r in res:
                 if r[3]:
                     put(core.MISSING_TEXT % core.shown_name(r[0]))
@@ -892,7 +952,23 @@ class App:
             )
             q.put(("error", why or "Unexpected error, see the log."))
 
+    def room_mm(self):
+        """'Adjust room at the chest' in mm: 0.0 when unticked or the text is no number."""
+        return core.chest_room_value(self.room_on.get(), self.room.get())
+
+    def pasties_mm(self):
+        """'Move pasties up / down' in mm: 0 when unticked or the text is no number."""
+        return core.pasties_value(self.pasties_on.get(), self.pasties.get())
+
     def poll(self):
+        want = "readonly" if self.pasties_on.get() else "disabled"
+        if want != self.pasties_state:
+            self.pasties_state = want
+            self.pasties_box.config(state=want)
+        want = "readonly" if self.room_on.get() else "disabled"
+        if want != self.room_state:  # the value list is only active while the box is ticked
+            self.room_state = want
+            self.room_box.config(state=want)
         try:
             while True:
                 kind, v = self.q.get_nowait()
@@ -966,6 +1042,8 @@ def drive(
     copy_moves=False,
     stop_on=None,
     make_zip=False,
+    chest_room=None,
+    pasties_shift=None,
 ):
     """Self-test: open the real window, drop an outfit on it, pick the body (and game folder, body file, Install
     tick, 'Replace the outfit's own version' tick), press Refit, wait for the result. close_on: text; when it shows up in the log, the window gets a real
@@ -995,6 +1073,12 @@ def drive(
     app.own.set(replace_own)
     app.moves.set(copy_moves)
     app.zip.set(make_zip)
+    if chest_room is not None:  # the value as text, as a user would pick or type it
+        app.room_on.set(True)
+        app.room.set(str(chest_room))
+    if pasties_shift is not None:
+        app.pasties_on.set(True)
+        app.pasties.set(str(pasties_shift))
     app.body.set(core.body_name(tag))
     app.show_body()
     t0 = time.time()
@@ -1136,6 +1220,69 @@ def drive_uninstall(log, pick=lambda entry: True):
     for x in shown:
         log("    list: " + x)
     return shown
+
+
+def room_test(log):
+    """Self-test of 'Adjust room at the chest' in the real window: the box is unticked and the value list inactive
+    at first; ticking makes it active, unticking inactive again (through poll(), no Tk call from a callback);
+    picked values, typed wrong input and values out of range give the right number; the settings are saved.
+    -> [problems]"""
+    import gc
+
+    gc.collect()
+    root = tk.Tk()
+    app = App(root, [])
+    bad, seen = [], {}
+    saved = dict(app.s)
+    steps = [
+        (lambda: (app.room_on.set(False), app.room.set("+0.0")), None),
+        (lambda: seen.update(off=str(app.room_box.cget("state")), v0=app.room_mm()), None),
+        (lambda: app.room_on.set(True), None),
+        (lambda: seen.update(on=str(app.room_box.cget("state")), n=len(app.room_box.cget("values"))), None),
+        (lambda: app.room.set("+2.0"), None),
+        (lambda: seen.update(v2=app.room_mm()), None),
+        (lambda: app.room.set("abc"), None),
+        (lambda: seen.update(vbad=app.room_mm()), None),
+        (lambda: app.room.set("99"), None),
+        (lambda: seen.update(vhigh=app.room_mm()), None),
+        (lambda: app.room.set("-1,5"), None),
+        (lambda: (seen.update(vneg=app.room_mm()), app.save(), seen.update(s_on=app.s.get("chest_room_on"), s_v=app.s.get("chest_room"))), None),
+        (lambda: (app.pasties_on.set(False), app.pasties.set("+0")), None),
+        (lambda: seen.update(p_off=str(app.pasties_box.cget("state")), p0=app.pasties_mm()), None),
+        (lambda: (app.pasties_on.set(True), app.pasties.set("+10")), None),
+        (lambda: seen.update(p_on=str(app.pasties_box.cget("state")), p_n=len(app.pasties_box.cget("values")), p10=app.pasties_mm()), None),
+        (lambda: app.pasties.set("xyz"), None),
+        (lambda: seen.update(p_bad=app.pasties_mm()), None),
+        (lambda: app.pasties.set("-99"), None),
+        (lambda: (seen.update(p_low=app.pasties_mm()), app.pasties.set("-7")), None),
+        (lambda: (app.save(), seen.update(ps_on=app.s.get("pasties_on"), ps_v=app.s.get("pasties_shift")), app.pasties_on.set(False)), None),
+        (lambda: seen.update(p_off2=str(app.pasties_box.cget("state")), p_voff=app.pasties_mm()), None),
+        (lambda: app.room_on.set(False), None),
+        (lambda: seen.update(off2=str(app.room_box.cget("state")), voff=app.room_mm()), None),
+    ]
+
+    def step(i):
+        if i < len(steps):
+            steps[i][0]()
+            root.after(350, step, i + 1)  # poll() runs every 100 ms in between
+        else:
+            app.s.clear()
+            app.s.update(saved)
+            app.save = lambda: None  # closing must not keep the test's values
+            core.save_settings(saved)
+            root.destroy()
+
+    root.after(400, step, 0)
+    root.mainloop()
+    del root
+    gc.collect()
+    want = dict(off="disabled", v0=0.0, on="readonly", n=17, v2=2.0, vbad=0.0, vhigh=6.0, vneg=-1.5, s_on=True, s_v=-1.5, off2="disabled", voff=0.0,
+                p_off="disabled", p0=0, p_on="readonly", p_n=61, p10=10, p_bad=0, p_low=-30, ps_on=True, ps_v=-7, p_off2="disabled", p_voff=0)
+    for k, v in want.items():
+        if seen.get(k) != v:
+            bad.append("%s: %r, expected %r" % (k, seen.get(k), v))
+    log("  room at the chest / move pasties controls: %s" % ("OK" if not bad else "; ".join(bad)))
+    return bad
 
 
 def main(files=(), close_after_ms=None):

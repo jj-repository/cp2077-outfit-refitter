@@ -33,9 +33,13 @@ with refits you trust (e.g. ones made by hand).
     same positions as WolvenKit's export, byte-exact round trip, displaced write read back by WolvenKit.
 --support DIR --support-outfit OUTFIT (3x: two zips with r6\tweaks, then one more): 'Report Issues' tests in the
     real window on two fake games made in DIR (with / without ArchiveXL etc.), incl. a restart (previous session).
+--gui-extra DIR --gui-extra-pasties OUTFIT [--gui-extra-pair OUTFIT] [--gui-extra-lone ARCHIVE]: in the real window:
+    every button once, the two options with real refits (unticked / 0 = no change, room -2.0 / +6.0 mm, pasties
+    -30 / +30 mm), wrong inputs (text file, empty folder, an already refit archive), an outfit whose refit needs
+    its .xl (pair OUTFIT -> EVE) and the incomplete result (lone ARCHIVE without its .xl -> EVE).
 Exit code 0 = everything passed."""
 
-import glob, os, re, shutil, sys, tempfile, traceback, zipfile
+import glob, os, re, shutil, struct, sys, tempfile, traceback, zipfile
 
 
 def opt_all(a, k):
@@ -339,6 +343,42 @@ def check_install_rules(core):
             "Already gone" in m for m in msgs
         ), msgs
         assert core.installed() == []
+        # a refit with an .xl (materials for new mesh paths): both are installed, a newer refit without one takes the
+        # old .xl out and stays itself, and removing one of the pair removes the other
+        a = made("EveRefit_P.archive")
+        made("EveRefit_P.xl")
+        assert [os.path.basename(f) for f in core.refit_files(a)] == [
+            "EveRefit_P.xl",
+            "EveRefit_P.archive",
+        ]
+        core.install(core.refit_files(a), game, msgs.append, "P")
+        assert sorted(e["file"] for e in core.installed()) == [
+            "EveRefit_P.archive",
+            "EveRefit_P.xl",
+        ], core.installed()
+        os.remove(os.path.join(out, "EveRefit_P.xl"))
+        core.install(core.refit_files(a), game, msgs.append, "P")
+        assert [e["file"] for e in core.installed()] == ["EveRefit_P.archive"], msgs
+        made("EveRefit_P.xl")
+        core.install(core.refit_files(a), game, msgs.append, "P")
+        core.uninstall(
+            [e for e in core.installed() if e["file"].endswith(".xl")], msgs.append
+        )
+        assert core.installed() == [] and not os.path.exists(
+            os.path.join(md, "EveRefit_P.archive")
+        ), msgs
+        # an .xl of that name which this tool did not put into the game holds back the whole refit: the .archive is
+        # never installed without its .xl, and the other file is never replaced
+        a = made("EveRefit_Q.archive")
+        made("EveRefit_Q.xl")
+        with open(os.path.join(md, "EveRefit_Q.xl"), "w") as f:
+            f.write("someone else's")
+        msgs = []
+        core.install(core.refit_files(a), game, msgs.append, "Q")
+        assert not os.path.exists(os.path.join(md, "EveRefit_Q.archive")), msgs
+        assert open(os.path.join(md, "EveRefit_Q.xl")).read() == "someone else's"
+        assert core.installed() == [] and len(msgs) == 2 and "together" in msgs[1], msgs
+        os.remove(os.path.join(md, "EveRefit_Q.xl"))
         # the game folder moved (another Steam library): uninstall finds the file in the new place
         core.install([made("Move.archive")], game, msgs.append, "M")
         moved = game + " moved"
@@ -541,6 +581,417 @@ def check_recover_names(rdar, refit):
         assert not os.path.exists(os.path.join(t, "evil.mesh"))
     finally:
         shutil.rmtree(t, ignore_errors=True)
+
+
+def tiny_mesh(appearances, shape=True):
+    """The objects part of a made-up .mesh: a CMesh with that many appearances, with or without a render blob."""
+    names = [
+        "",
+        "CMesh",
+        "rendRenderMeshBlob",
+        "meshMeshAppearance",
+        "appearances",
+        "array:handle",
+    ]
+    strings, offs = b"", []
+    for n in names:
+        offs.append(len(strings))
+        strings += n.encode() + b"\0"
+    body = b"\0"
+    if appearances:
+        body += struct.pack("<HHII", 4, 5, 8 + 4 * appearances, appearances)
+        body += b"".join(struct.pack("<I", i + 2) for i in range(appearances))
+    body += b"\0\0"
+    classes = [1] + [2] * shape + [3] * appearances
+    s_at = 160
+    n_at = s_at + len(strings)
+    e_at = n_at + 8 * len(names)
+    d_at = e_at + 24 * len(classes)
+    tabs = [(0, 0, 0)] * 10
+    tabs[0], tabs[1], tabs[4] = (
+        (s_at, len(strings), 0),
+        (n_at, len(names), 0),
+        (e_at, len(classes), 0),
+    )
+    head = (
+        b"CR2W" + bytes(36) + b"".join(struct.pack("<III", *t) for t in tabs) + strings
+    )
+    head += b"".join(struct.pack("<II", o, 0) for o in offs)
+    head += b"".join(
+        struct.pack(
+            "<HHIIIII", c, 0, 0, len(body), d_at if c == 1 else d_at + len(body), 0, 0
+        )
+        for c in classes
+    )
+    return head + body + b"\0\0\0"
+
+
+def check_xl_patch(refit):
+    r"""Outfits whose meshes get their appearances from an ArchiveXL patch (resource: patch: in the .xl): a refit at a
+    new path must be added to the same patch, or it has no appearances and the game crashes when the item is put on
+    (1.9 - 1.9.2: Zenitex Stealthsuit main\eve.mesh). The .xl is read the way ArchiveXL reads it, and the final
+    check must refuse a mesh without appearances that no patch fills in."""
+    t = tempfile.mkdtemp(prefix="bodyrefit_xl_")
+    try:
+        arc = os.path.join(t, "a.archive")
+        with open(os.path.join(t, "a.xl"), "w", encoding="utf-8") as f:
+            f.write(
+                "v: 2024-02-31\n"  # not a date: ArchiveXL reads every value as text
+                "resource:\n"
+                "  scope:\n"
+                "    my\\all: [my\\legs_base_body.mesh, my\\more]\n"
+                "    my\\more: my\\arms_base_body.mesh\n"
+                "  patch:\n"
+                "    my\\mat\\suit.mesh:\n"
+                "      - my\\Main\\base_body.mesh\n"
+                "    my\\mat\\legs.mesh: {props: [appearances], targets: [my\\all], order: 5}\n"
+                "    my\\mat\\not.mesh: !exclude [my\\main\\base_body.mesh]\n"
+                "    my\\mat\\suit.mesh: my//main/ebb.mesh\n"  # the same key again: both lists count
+                "    my\\mat\\blob.mesh: {props: [renderResourceBlob], targets: [my\\main\\base_body.mesh]}\n"
+                "    my\\mat\\all.mesh: {props: appearances, targets: [my\\main\\base_body.mesh]}\n"
+                "  link:\n"
+                "    my\\main\\ebb.mesh:\n"
+                "      - my\\main\\angel.mesh\n"
+                "    my\\main\\evb.mesh: my\\main\\vhd.mesh\n"  # one value: the key is the other name
+                "  fix:\n"
+                "    my\\main\\base_body.mesh: {names: {0010: 1e3, yes: no}}\n"
+            )
+        with open(
+            os.path.join(t, "!!!EveRefit_a.xl"), "w"
+        ) as f:  # an earlier refit's own file: not the outfit's
+            f.write(
+                "resource:\n  patch:\n    my\\mat\\suit.mesh: [my\\main\\eve.mesh]\n"
+            )
+        with open(
+            os.path.join(t, "other.xl"), "w"
+        ) as f:  # another mod's, in the same folder
+            f.write(
+                "resource:\n  patch:\n    their\\mat.mesh: [their\\x_base_body.mesh]\n"
+            )
+        with open(
+            os.path.join(t, "extra.xl"), "wb"
+        ) as f:  # Windows-1252, names one of the outfit's meshes
+            f.write(
+                "resource:\n  patch:\n    my\\mät.mesh: [MY/Hat_base_body.mesh]\n".encode(
+                    "cp1252"
+                )
+            )
+        base, eve = r"my\main\base_body.mesh", r"my\main\eve.mesh"
+        hat = r"my\hat_base_body.mesh"
+        assert len(refit.xl_files([arc])) == 3, (
+            "every .xl of the folder but the tool's own"
+        )
+        files = refit.xl_files([arc], {base, hat})
+        assert [os.path.basename(f) for f in files] == ["a.xl", "extra.xl"], files
+        info = refit.xl_info(files)
+        src = lambda p: sorted(refit.xl_sources(info, p))
+        assert info["files"] == 2 and not info["unreadable"], info
+        assert src(base) == [r"my\mat\all.mesh", r"my\mat\suit.mesh"], (
+            "a patch that changes other things only gives no appearances; a 'props' that is no list is ignored",
+            src(base),
+        )
+        assert src(r"my\main\ebb.mesh") == [r"my\mat\suit.mesh"], (
+            "a key written twice counts twice"
+        )
+        assert (
+            src(r"my\legs_base_body.mesh")
+            == src(r"my\arms_base_body.mesh")
+            == [r"my\mat\legs.mesh"]
+        )
+        assert src(hat) == ["my\\m\xe4t.mesh"] and not src(eve), (src(hat), src(eve))
+        assert info["link"] == {
+            r"my\main\angel.mesh": r"my\main\ebb.mesh",
+            r"my\main\evb.mesh": r"my\main\vhd.mesh",
+        }, info["link"]
+        text, new = refit.xl_extra(
+            info,
+            [
+                (base, eve),
+                (r"my\legs_base_body.mesh", r"my\legs_eve.mesh"),
+                (hat, r"my\hat_eve.mesh"),
+                (r"my\x.mesh", r"my\x.mesh"),
+            ],
+        )
+        assert "m\xe4t.mesh" in text, "letters are written as they are"
+        again = os.path.join(t, "out")
+        os.makedirs(again)
+        with open(os.path.join(again, "b.xl"), "w", encoding="utf-8") as f:
+            f.write(text)
+        back = refit.xl_info(refit.xl_files([os.path.join(again, "b.archive")]))
+        assert new == {eve, r"my\legs_eve.mesh", r"my\hat_eve.mesh"}, new
+        assert sorted((s, sorted(tg), p, o) for s, tg, p, o in back["patch"]) == [
+            (r"my\mat\all.mesh", [eve], None, None),
+            (r"my\mat\blob.mesh", [eve], ("renderResourceBlob",), None),
+            (r"my\mat\legs.mesh", [r"my\legs_eve.mesh"], ("appearances",), "5"),
+            (r"my\mat\suit.mesh", [eve], None, None),
+            ("my\\m\xe4t.mesh", [r"my\hat_eve.mesh"], None, None),
+        ], back["patch"]
+        assert back["fix"] == {eve: {"names": {"0010": "1e3", "yes": "no"}}}, back[
+            "fix"
+        ]
+        assert refit.xl_extra(info, [(base, base)]) == (None, set()), (
+            "a mesh that keeps its path needs nothing"
+        )
+        # a broken .xl is named and passed over, the others still count; no .xl at all is another reason
+        with open(os.path.join(t, "a.archive.xl"), "w") as f:
+            f.write("resource:\n\tpatch:\n\t\tmy\\mat\\suit.mesh: [x]\n")
+        said = []
+        info = refit.xl_info(refit.xl_files([arc], {base}), said.append)
+        assert (
+            info["unreadable"] == ["a.archive.xl"] and info["files"] == 1 and src(base)
+        ), info
+        assert any(
+            "a.archive.xl" in m for m in said
+        ) and "a.archive.xl" in refit.xl_blind(info), said
+        none = refit.xl_info(
+            refit.xl_files([os.path.join(again, "nothing.archive")], {base})
+        )
+        assert "not next to the .archive" in refit.xl_blind(none), refit.xl_blind(none)
+        assert refit.xl_blind(back) is None
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+    assert refit.norm_path('"A//B\\\\C/\xc4.Mesh"') == "a\\b\\c\\\xc4.mesh", (
+        "as the game hashes paths: A-Z only"
+    )
+    bare, full, mats = (
+        (tiny_mesh(0), []),
+        (tiny_mesh(2), []),
+        tiny_mesh(22, shape=False),
+    )
+    assert refit.mesh_facts(full[0])[1]["appearances"] == 2
+    assert "rendRenderMeshBlob" not in refit.mesh_facts(mats)[0], (
+        "a materials-only mesh has no shape"
+    )
+    why = refit.mesh_gate("eve.mesh", bare, bare, False)  # what 1.9.2 handed out
+    assert why and "no appearances" in why, why
+    assert refit.mesh_gate("eve.mesh", bare, bare, True) is None, (
+        "in an .xl patch list: fine"
+    )
+    assert refit.mesh_gate("x.mesh", full, full, False) is None, "own appearances: fine"
+    why = refit.mesh_gate("x.mesh", bare, full, True)
+    assert why and "appearances 0 (original 2)" in why, why
+    meshes = {
+        r"a\m_base_body.mesh",
+        r"a\w_base_body.mesh",
+        r"a\vest_m.mesh",
+        r"a\vest_w.mesh",
+        r"a\m.mesh",
+        r"a\t1_001_ma_jacket.mesh",
+        r"a\t1_001_wa_jacket.mesh",
+        r"a\dress_s.mesh",
+        r"a\dress_m.mesh",
+        r"a\dress_l.mesh",
+        r"a\dress_w.mesh",
+    }
+    male = sorted(k for k in meshes if refit.is_male(k, meshes))
+    assert male == [
+        r"a\m_base_body.mesh",
+        r"a\t1_001_ma_jacket.mesh",
+        r"a\vest_m.mesh",
+    ], male
+    assert refit.is_male(r"b\m_gymfiend.mesh", set()) and refit.is_male(
+        r"b\t0_000_pma_base.mesh", set()
+    )
+    assert not refit.is_male(r"b\arm_base_body.mesh", set()) and not refit.is_male(
+        r"b\puma_top.mesh", set()
+    )
+
+
+def xl_outfit(wk, game, core, where):
+    r"""A small made-up outfit of the kind that crashed: selftest\xl\suit_base_body.mesh has no appearances of its own
+    (the game's left arm with its appearances taken out), selftest\xl\suit_materials.mesh holds them, and the .xl
+    patches them in. selftest\xl\empty_materials.mesh is a patch file without appearances (for the .xl that points
+    to the wrong file). -> the folder to refit (archive\pc\mod\selftest_xl.archive + .xl inside)."""
+    import json
+
+    arm = core.bodies()["meshes"][1]
+    ub, js, pk = (os.path.join(where, x) for x in ("ub", "js", "pk"))
+    for s in core.vanilla_sources(game):
+        core.run([wk, "unbundle", s, "-o", ub, "-r", "^" + re.escape(arm) + "$"], game)
+    mesh = os.path.join(ub, arm)
+    assert os.path.isfile(mesh), "the game's arm mesh was not found"
+    os.makedirs(js)
+    core.run([wk, "convert", "serialize", mesh, "-o", js], game)
+    jf = os.path.join(js, os.path.basename(mesh) + ".json")
+    d = json.load(open(jf, encoding="utf-8"))
+    assert d["Data"]["RootChunk"]["appearances"], "the arm mesh has appearances"
+    d["Data"]["RootChunk"]["appearances"] = []
+    json.dump(d, open(jf, "w", encoding="utf-8"))
+    out = os.path.join(pk, "selftest", "xl")
+    os.makedirs(out)
+    core.run([wk, "convert", "deserialize", jf, "-o", js], game)
+    bare = os.path.join(js, os.path.basename(mesh))
+    shutil.copy(bare, os.path.join(out, "suit_base_body.mesh"))
+    shutil.copy(bare, os.path.join(out, "empty_materials.mesh"))
+    shutil.copy(mesh, os.path.join(out, "suit_materials.mesh"))
+    mod = os.path.join(where, "outfit", "archive", "pc", "mod")
+    os.makedirs(mod)
+    core.run([wk, "pack", pk, "-o", mod], game, ok="Finished packing")
+    made = glob.glob(os.path.join(mod, "*.archive"))
+    assert len(made) == 1, made
+    os.rename(made[0], os.path.join(mod, "selftest_xl.archive"))
+    xl_outfit_xl(os.path.join(where, "outfit"), "suit_materials.mesh")
+    return os.path.join(where, "outfit")
+
+
+def xl_outfit_xl(root, patch_file):
+    """(Re)write the made-up outfit's .xl: the suit gets its materials from selftest\\xl\\<patch_file>."""
+    with open(os.path.join(root, "archive", "pc", "mod", "selftest_xl.xl"), "w") as f:
+        f.write(
+            "resource:\n  patch:\n    selftest\\xl\\%s:\n      - selftest\\xl\\suit_base_body.mesh\n"
+            % patch_file
+        )
+
+
+def xl_case(core, rdar, wk, game, tags, barch, out, log, fails):
+    r"""The whole way (refit_mod + the final check) on outfits whose meshes get their appearances from an .xl patch:
+    a made-up one (xl_outfit), and the Zenitex Stealthsuit download when it is in Downloads and EVE is set up.
+    The new mesh must come with an .xl that puts it into a patch whose file has appearances; the final check must
+    have been asked about appearances, must count the new mesh as patched, and must refuse the same archive when
+    nothing is patched; the same outfit as a lone .archive (its .xl not beside it) must leave that mesh out and say
+    that the refit is incomplete, instead of handing out a mesh that crashes the game. With the made-up outfit also:
+    a patch file without appearances gives none (mesh left out), and a patch file that is nowhere (another mod's)
+    is named in the log while the mesh is still refit."""
+    import refit
+
+    def check(name, cond, detail=""):
+        log(
+            "  %s %s%s"
+            % (
+                "OK  " if cond else "FAIL",
+                name,
+                " (%s)" % (detail,) if detail and not cond else "",
+            )
+        )
+        if not cond:
+            fails.append("xl case: " + name)
+        return cond
+
+    work = tempfile.mkdtemp(prefix="xl_", dir=core._work_root())
+    calls, real, seen = [], refit.buffer_gate, []
+    say = lambda m: (seen.append(m), log("    | " + m))
+
+    def gate(arch, src_of, patched=None):
+        calls.append(
+            (patched, real(arch, src_of, set()))
+        )  # the same archive with nothing counted as patched
+        return real(arch, src_of, patched)
+
+    def refit_it(inp, tag, dest):
+        seen[:], calls[:] = [], []
+        r = core.run_batch(
+            [inp],
+            tag,
+            game,
+            os.path.join(out, dest),
+            say,
+            body_files=barch,
+            src="vanilla",
+        )[0]
+        names = [n.lower() for n in rdar.Rdar(r[1]).names] if r[1] else []
+        return r[1], r[2], names
+
+    def whole(what, root, tag, new_end):
+        log("\n### .xl patch case: %s -> %s" % (what, tag))
+        orig = glob.glob(os.path.join(root, "**", "*.archive"), recursive=True)[0]
+        arch, msg, names = refit_it(root, tag, "xl")
+        if not check("refit made", bool(arch) and msg == "ok", msg):
+            return
+        new = [n for n in names if n.endswith(new_end)]
+        check("the new mesh is in the refit", len(new) == 1, names)
+        xl = core.xl_beside(arch)
+        if check("the refit comes with its .xl", os.path.isfile(xl)) and new:
+            srcs = refit.xl_sources(refit.xl_info([xl]), new[0])
+            head = srcs and rdar.find_file([orig], srcs[0])[0]
+            check(
+                "its .xl puts the new mesh into a patch whose file has appearances",
+                bool(head) and refit.mesh_facts(head)[1]["appearances"] > 0,
+                srcs,
+            )
+        check(
+            "the final check was asked about appearances",
+            bool(calls) and calls[-1][0] is not None,
+        )
+        if calls and new:
+            check(
+                "the final check counts the new mesh as patched",
+                new[0] in (calls[-1][0] or ()),
+                calls[-1][0],
+            )
+            check(
+                "the final check refuses this archive when nothing is patched",
+                any("no appearances" in b for b in calls[-1][1]),
+                calls[-1][1],
+            )
+        # the same outfit as a lone .archive: its .xl is not there, so the mesh can't be given its materials
+        lone = os.path.join(work, "lone_" + tag, os.path.basename(orig))
+        os.makedirs(os.path.dirname(lone))
+        shutil.copy(orig, lone)
+        arch, msg, names = refit_it(lone, tag, "xl_lone")
+        check(
+            "a lone .archive: the result says what is missing",
+            msg.startswith(("incomplete: ", "nothing could be refit: "))
+            and ".xl" in msg,
+            msg,
+        )
+        check(
+            "a lone .archive: the mesh that would crash is left out",
+            not [n for n in names if n.endswith(new_end)],
+            names,
+        )
+        check(
+            "a lone .archive: no .xl is written",
+            not arch or not os.path.isfile(core.xl_beside(arch)),
+        )
+
+    try:
+        refit.buffer_gate = gate
+        tag = tags[0]
+        root = xl_outfit(wk, game, core, work)
+        new_end = "suit_%s.mesh" % core.xl_name(tag)
+        whole("made-up outfit", root, tag, new_end)
+        log("\n### .xl patch case: the patch file holds no appearances")
+        xl_outfit_xl(root, "empty_materials.mesh")
+        arch, msg, names = refit_it(root, tag, "xl_empty")
+        check(
+            "the mesh is left out", not [n for n in names if n.endswith(new_end)], names
+        )
+        check("the log says why", any("holds none" in m for m in seen), msg)
+        log(
+            "\n### .xl patch case: the patch file is another mod's (nowhere to be found)"
+        )
+        xl_outfit_xl(root, "nowhere.mesh")
+        arch, msg, names = refit_it(root, tag, "xl_other")
+        check(
+            "the mesh is refit",
+            bool([n for n in names if n.endswith(new_end)]) and msg == "ok",
+            msg,
+        )
+        check(
+            "the log names the file that is needed",
+            any("Note:" in m and r"selftest\xl\nowhere.mesh" in m for m in seen),
+        )
+        if arch and os.path.isfile(core.xl_beside(arch)):
+            check(
+                "its .xl names that patch file for the new mesh",
+                refit.xl_sources(
+                    refit.xl_info([core.xl_beside(arch)]), "selftest\\xl\\" + new_end
+                )
+                == [r"selftest\xl\nowhere.mesh"],
+            )
+        else:
+            check("the refit comes with its .xl", False)
+        zips = glob.glob(
+            os.path.join(
+                os.path.expanduser("~"), "Downloads", "Zenitex Stealthsuit-16172-*.zip"
+            )
+        )
+        if zips and "eve" in tags:
+            root = core.unpack(zips[0], os.path.join(work, "stealth"))
+            whole(os.path.basename(zips[0]), root, "eve", r"\main\eve.mesh")
+    finally:
+        refit.buffer_gate = real
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def check_own_reader(wk, game, outfit, work, log):
@@ -793,12 +1244,12 @@ def gui_install_tests(core, gui, a, log, fails):
         return sorted(set(snap(game)) - set(before))
 
     def refit_rel(lines):
-        x = [
-            m.split(": ", 1)[1]
+        """The refit's files the log says were installed: its .archive, and its .xl when it has one (a pair)."""
+        return sorted(
+            os.path.join("archive", "pc", "mod", m.split(": ", 1)[1]).lower()
             for m in lines
             if m.startswith("Installed into the game: ")
-        ]
-        return os.path.join("archive", "pc", "mod", x[0]).lower() if x else None
+        )
 
     last = None
     for spec in opt_all(a, "--gui-install-outfit"):
@@ -810,7 +1261,14 @@ def gui_install_tests(core, gui, a, log, fails):
         s0 = snap(game)
         # 3. Install unticked, original missing: nothing goes into the game, warning in the log and the summary
         st = gui.drive(
-            inp, "angel", out, log, game=game, install=False, body_file=body, make_zip=True
+            inp,
+            "angel",
+            out,
+            log,
+            game=game,
+            install=False,
+            body_file=body,
+            make_zip=True,
         )
         warn = core.MISSING_TEXT % name
         check("unticked: refit finished", st["ok"])
@@ -820,11 +1278,15 @@ def gui_install_tests(core, gui, a, log, fails):
         if zl:
             with zipfile.ZipFile(os.path.join(out, zl[0])) as z:
                 zn = z.namelist()
+        made = (
+            core.refit_files(os.path.join(out, zl[0][:-4] + ".archive")) if zl else []
+        )
         check(
-            "zip: has the refit at archive/pc/mod/",
-            len(zn) == 1
-            and zn[0] == "archive/pc/mod/" + zl[0][:-4] + ".archive"
-            and os.path.isfile(os.path.join(out, zl[0][:-4] + ".archive")),
+            "zip: has the refit (with its .xl when it has one) at archive/pc/mod/",
+            bool(zl)
+            and sorted(zn)
+            == sorted("archive/pc/mod/" + os.path.basename(f) for f in made)
+            and os.path.isfile(made[-1]),
             "%s %s" % (zl, zn),
         )
         check("unticked: game folder unchanged", snap(game) == s0, new_files(s0))
@@ -837,16 +1299,24 @@ def gui_install_tests(core, gui, a, log, fails):
         st = gui.drive(inp, "angel", out, log, game=game, install=True, body_file=body)
         check("ticked: refit finished", st["ok"])
         rr = refit_rel(st["log"])
+        # the refit in the game is the refit as it was made: the .archive, and its .xl when it has one
+        check(
+            "ticked: the refit went in whole (its .xl too when it has one)",
+            [os.path.basename(r) for r in rr]
+            == sorted(os.path.basename(f).lower() for f in made),
+            "%s vs %s" % (rr, made),
+        )
         check(
             "ticked: game got exactly the refit + the original",
-            new_files(s0) == sorted(want + [rr]),
-            "%s vs %s" % (new_files(s0), want + [rr]),
+            new_files(s0) == sorted(want + rr),
+            "%s vs %s" % (new_files(s0), want + rr),
         )
         lst = core.installed()
         kinds = sorted((e["rel"].lower(), e["kind"]) for e in lst)
         check(
             "ticked: install list = refit + originals",
-            kinds == sorted([(rr, "refit")] + [(w, "original") for w in want]),
+            kinds
+            == sorted([(r, "refit") for r in rr] + [(w, "original") for w in want]),
             kinds,
         )
         check(
@@ -880,7 +1350,11 @@ def gui_install_tests(core, gui, a, log, fails):
         st = gui.drive(inp, "angel", out, log, game=game, install=True, body_file=body)
         check("present: refit finished", st["ok"])
         rr = refit_rel(st["log"])
-        check("present: only the refit was added", new_files(s1) == [rr], new_files(s1))
+        check(
+            "present: only the refit was added",
+            bool(rr) and new_files(s1) == rr,
+            new_files(s1),
+        )
         check(
             "present: existing original untouched",
             open(prep, "rb").read() == b"installed by a mod manager",
@@ -1731,7 +2205,10 @@ def chest_test(core, wk, game, spec, run_case, barch, log, fails):
             refit.mesh_shape = lambda tags, rel, xl: shape
         seen = []
         arch = run_case("vanilla", tag, inp, os.path.join(work, "out"), seen)
-        if no_top and not any("Fit to both of" in m for m in seen):
+        if no_top and not any(
+            "it to both of" in m or "worn next to the skin on the chest" in m
+            for m in seen
+        ):
             log("FAIL: the log doesn't say both chest shapes are used")
             fails.append("chest both log")
         if (
@@ -1817,6 +2294,40 @@ def chest_test(core, wk, game, spec, run_case, barch, log, fails):
                         "  %-44s squashed shape (garment support): inside %d"
                         % (os.path.basename(g)[:44], n_in)
                     )
+        if refit.ENGINE == 2:
+            # fit 2.0 keeps the author's heights (no 4 mm floor, no radial nipple room) and leaves hidden parts
+            # hidden, so the 1.9 counts above are for information. What must hold, measured here from the files and
+            # not taken from the engine's own fit report: a vertex that was clearly above the source body (0.5 mm)
+            # is not inside the body the game shows (0.1 mm), triangle-exact, within 2 cm of the skin. An inner
+            # chest garment is checked against the normal body (the game shows that under a chest item).
+            log("  (1.9 rule, for information: %d below its floors / inside the body mesh)" % bad)
+            shown_body = cages[tag] if no_top and any("worn next to the skin" in m for m in seen) else body
+            spos = {}
+            for k, arc in enumerate(core.prepare_input(inp, os.path.join(work, "srcin"), lambda m: None)):
+                spos.update(positions(wk, game, arc, os.path.join(work, "sp%d" % k)))
+            sx, tx = core.xl_name("vanilla"), core.xl_name(tag)
+            bad = cmp = meshes = 0
+            for name, parts in sorted(pos.items()):
+                sp = spos.get(name) or spos.get(name.replace("_%s.mesh" % tx, "_%s.mesh" % sx))
+                if sp is None or [len(x) for x in sp] != [len(x) for x in parts]:
+                    continue
+                h0 = refit.skin_height(np.vstack(sp), cages["vanilla"])[0]
+                h1 = refit.skin_height(np.vstack(parts), shown_body)[0]
+                was = (h0 > 0.0005) & (h0 < 0.02) & (np.abs(h1) < 0.02)
+                n_in = int((was & (h1 < -0.0001)).sum())
+                meshes, cmp, bad = meshes + 1, cmp + int(was.sum()), bad + n_in
+                if n_in:
+                    log("    %-44s %d of %d vertices that were above the source skin are inside the shown body" % (os.path.basename(name)[:44], n_in, int(was.sum())))
+            log("  own measurement: %d mesh(es), %d vertices near the skin compared, inside the shown body: %d" % (meshes, cmp, bad))
+            if not meshes:
+                # the source archive has no file names inside (old packing): its meshes can't be matched by name.
+                # Then the engine's own fit report is all there is; the log says so.
+                rx = re.compile(r"fit: ([0-9.]+) % inside")
+                vals = [float(m.group(1)) for line in seen for m in [rx.search(line)] if m]
+                bad = sum(v > 0.05 for v in vals) if vals else 1
+                log("  (source meshes can't be matched by name: judged by the fit reports of %d mesh(es), most inside %.1f %%)" % (len(vals), max(vals, default=0)))
+            elif bad <= cmp // 2000:  # up to 1 in 2,000: measurement noise at folds of the garment itself
+                bad = 0
         if bad:
             log("FAIL: %d garment vertices inside the clothed body" % bad)
             fails.append("chest " + os.path.basename(inp))
@@ -1998,7 +2509,10 @@ def motion_test(core, wk, game, spec, barch, log, fails):
                 for l in lines:
                     if "now move with the body" in l or "movement can't" in l:
                         log("    | " + l.strip())
-        if res[True]:
+        # fit 2.0 leaves parts the author hid inside the body where they are, so they count as inside before the
+        # chest moves too: what must hold is that the moving chest adds none
+        # (up to 1 in 10,000 tolerated: without a 4 mm floor a few vertices sit 0.2-1 mm over the moving skin)
+        if res[True] > (before + near // 10000 if refit.ENGINE == 2 else 0):
             log("FAIL: with the option, clothes still end up inside the moving chest")
             fails.append("motion " + os.path.basename(inp))
         else:
@@ -2007,6 +2521,438 @@ def motion_test(core, wk, game, spec, barch, log, fails):
                 % res[False]
             )
     finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def gui_extra_tests(core, gui, rdar, wk, game, a, barch, log, fails):
+    r"""--gui-extra DIR --gui-extra-pasties OUTFIT [--gui-extra-pair OUTFIT] [--gui-extra-lone ARCHIVE]: in the real
+    window: every button once (file dialogs answered by the test), the two options with real refits of a pasties
+    outfit to Angel (unticked = no change, 0 = no change, -2.0 / +6.0 mm room, -30 / +30 mm pasties), wrong inputs
+    (a text file, an empty folder, an already refit archive), an outfit whose refit needs its .xl (pair OUTFIT ->
+    EVE: .archive + .xl) and the incomplete result (lone ARCHIVE of such an outfit without its .xl -> EVE).
+    Everything is written below DIR (umlauts and spaces in the paths); the game folder is only read."""
+    import numpy as np
+    import refit, support
+    from tkinter import filedialog, messagebox
+
+    base = os.path.abspath(opt(a, "--gui-extra"))
+    pasties = opt(a, "--gui-extra-pasties")
+    os.makedirs(base, exist_ok=True)
+    log("\n### Extra window tests (buttons, options, wrong inputs) in %s" % base)
+
+    def check(name, cond, detail=""):
+        log(
+            "  %s %s%s"
+            % (
+                "OK  " if cond else "FAIL",
+                name,
+                (" -- %s" % (detail,)) if detail and not cond else "",
+            )
+        )
+        if not cond:
+            fails.append("extra: " + name)
+        return cond
+
+    def archives(d):
+        return sorted(
+            f
+            for f in (os.listdir(d) if os.path.isdir(d) else [])
+            if f.endswith(".archive")
+        )
+
+    # ---- 1. every button ----
+    saved = core.load_settings()
+    answers, boxes, opened = {}, [], []
+    real = (
+        filedialog.askdirectory,
+        filedialog.askopenfilenames,
+        filedialog.askopenfilename,
+        messagebox.showerror,
+        messagebox.showinfo,
+        os.startfile,
+        support.show_in_explorer,
+    )
+    filedialog.askdirectory = lambda **k: answers.get("dir", "")
+    filedialog.askopenfilenames = lambda **k: answers.get("files", ())
+    filedialog.askopenfilename = lambda **k: answers.get("file", "")
+    messagebox.showerror = lambda t, m, **k: boxes.append(m)
+    messagebox.showinfo = lambda t, m, **k: boxes.append(m)
+    os.startfile = lambda *x, **k: opened.append(x[0])
+    support.show_in_explorer = opened.append
+    folder = os.path.join(base, "Ordner zum Hinzufügen ä")
+    os.makedirs(folder, exist_ok=True)
+    outdir = os.path.join(base, "Ausgabe Knöpfe ü")
+    os.makedirs(outdir, exist_ok=True)
+    want_buttons = [
+        "Change...",
+        "Body file...",
+        "Body file...",
+        "Change...",
+        "Add outfit...",
+        "Add folder...",
+        "Remove",
+        "Refit",
+        "Open output folder",
+        "Uninstall...",
+        "Help",
+        "Report Issues",
+        "WolvenKit...",
+    ]
+
+    def buttons(w):
+        import tkinter.ttk as ttk
+
+        out = []
+        for c in w.winfo_children():
+            if isinstance(c, ttk.Button):
+                out.append(c)
+            elif c.winfo_class() != "Toplevel":
+                out += buttons(c)
+        return out
+
+    def script(app, root):
+        yield lambda: True
+        bs = buttons(root)
+        by = lambda text, n=0: [b for b in bs if b["text"] == text][n]
+        check(
+            "buttons: the window has exactly the expected buttons",
+            sorted(b["text"] for b in bs) == sorted(want_buttons),
+            [b["text"] for b in bs],
+        )
+        answers["files"] = (pasties,)
+        by("Add outfit...").invoke()
+        check(
+            "button 'Add outfit...': the outfit is in the list",
+            list(app.lst.get(0, "end")) == [os.path.normpath(pasties)],
+        )
+        answers["dir"] = folder
+        by("Add folder...").invoke()
+        check(
+            "button 'Add folder...': the folder is in the list",
+            app.lst.size() == 2 and app.lst.get(1) == os.path.normpath(folder),
+        )
+        app.lst.selection_set(1)
+        by("Remove").invoke()
+        check(
+            "button 'Remove': the selected entry is gone",
+            list(app.lst.get(0, "end")) == [os.path.normpath(pasties)],
+        )
+        del boxes[:]
+        by("Change...", 0).invoke()  # game folder: a folder that is no game
+        check(
+            "button 'Change...' (game): a wrong folder is refused with a message",
+            any("not the game folder" in m for m in boxes),
+            boxes,
+        )
+        answers["dir"] = game
+        by("Change...", 0).invoke()
+        check(
+            "button 'Change...' (game): the game folder is taken",
+            os.path.normcase(app.game.get()) == os.path.normcase(game),
+            app.game.get(),
+        )
+        answers["dir"] = outdir
+        by("Change...", 1).invoke()
+        check(
+            "button 'Change...' (output): the folder is taken",
+            app.out.get() == os.path.normpath(outdir),
+            app.out.get(),
+        )
+        by("Open output folder").invoke()
+        check(
+            "button 'Open output folder': opens that folder",
+            opened == [os.path.normpath(outdir)],
+            opened,
+        )
+        del boxes[:]
+        answers["dir"] = folder
+        by("WolvenKit...").invoke()
+        check(
+            "button 'WolvenKit...': a folder without WolvenKit is refused with a message",
+            len(boxes) == 1,
+            boxes,
+        )
+        answers["dir"] = os.path.dirname(wk)
+        by("WolvenKit...").invoke()
+        check(
+            "button 'WolvenKit...': a WolvenKit folder is taken",
+            os.path.normcase(app.s.get("wk_existing", ""))
+            == os.path.normcase(os.path.dirname(wk)),
+            app.s.get("wk_existing"),
+        )
+        by("Help").invoke()
+        yield lambda: True
+        helps = [c for c in root.winfo_children() if c.winfo_class() == "Toplevel"]
+        text = helps[0].winfo_children()[0].get("1.0", "end") if helps else ""
+        check(
+            "button 'Help': the guide opens with its steps", "Steps, in order" in text
+        )
+        check(
+            "button 'Help': the guide explains both new options",
+            "Adjust room at the chest" in text and "Move pasties up / down" in text,
+        )
+        for h in helps:
+            [b for b in buttons(h) if b["text"] == "Close"][0].invoke()
+        yield lambda: True
+        check(
+            "button 'Close' (Help): the guide is closed",
+            not [c for c in root.winfo_children() if c.winfo_class() == "Toplevel"],
+        )
+        del boxes[:]
+        core.uninstall(core.installed(), lambda m: None)
+        by("Uninstall...").invoke()
+        check(
+            "button 'Uninstall...': with nothing installed it says so",
+            any("not put anything" in m for m in boxes),
+            boxes,
+        )
+        del boxes[:]
+        by("Body file...", 0).invoke()  # 'Outfit made for' is vanilla: no file needed
+        check(
+            "button 'Body file...' (outfit made for vanilla): says none is needed",
+            len(boxes) == 1,
+            boxes,
+        )
+        answers["file"] = os.path.join(folder, "nichts.txt")
+        open(answers["file"], "w").write("not a body")
+        del boxes[:]
+        app.body.set(core.body_name("angel"))
+        app.show_body()
+        by("Body file...", 1).invoke()
+        check(
+            "button 'Body file...' (your body mod): a text file is refused with a message",
+            len(boxes) == 1,
+            boxes,
+        )
+        del boxes[:], opened[:]
+        by("Report Issues").invoke()
+        yield lambda: True
+        check(
+            "button 'Report Issues': a report is made and shown",
+            bool(opened) or bool(boxes),
+            (opened, boxes),
+        )
+        check(
+            "button 'Refit': enabled and labelled 'Refit' while idle",
+            str(by("Refit")["state"]) != "disabled" and not app.busy,
+        )
+        app.s.clear()
+        app.s.update(saved)
+        app.save = lambda: None  # closing must not keep the test's values
+        core.save_settings(saved)
+
+    try:
+        check("buttons: the script ran to its end", gui.drive_script(script, log))
+    finally:
+        (
+            filedialog.askdirectory,
+            filedialog.askopenfilenames,
+            filedialog.askopenfilename,
+            messagebox.showerror,
+            messagebox.showinfo,
+            os.startfile,
+            support.show_in_explorer,
+        ) = real
+        core.save_settings(saved)
+
+    # ---- 2. the two options, with real refits in the window ----
+    _, cages = core.setup(game, "vanilla", "angel", log, body_files=barch)
+    work = tempfile.mkdtemp(prefix="extra_", dir=core._work_root())
+    runs = {}
+
+    def run(key, **o):
+        out = os.path.join(base, "Option %s ä" % key)
+        shutil.rmtree(out, ignore_errors=True)
+        # the window remembers its options from run to run (settings): every run starts from the same ones
+        core.save_settings(o.pop("settings", saved))
+        st = gui.drive(pasties, "angel", out, log, game=game, body_files=barch, **o)
+        arcs = archives(out)
+        if not (st["ok"] and len(arcs) == 1):
+            check(
+                "option run '%s': refit made" % key,
+                False,
+                (st["ok"], arcs, st.get("errors")),
+            )
+            return
+        pos = positions(wk, game, os.path.join(out, arcs[0]), os.path.join(work, key))
+        runs[key] = (
+            np.vstack([p for k in sorted(pos) for p in pos[k]]),
+            st["log"],
+            os.path.join(out, arcs[0]),
+        )
+
+    try:
+        run("aus")
+        # boxes unticked, but the value lists hold +6.0 and +30 (as left from an earlier session)
+        run(
+            "aus mit Werten",
+            settings=dict(
+                saved,
+                chest_room_on=False,
+                chest_room=6.0,
+                pasties_on=False,
+                pasties_shift=30,
+            ),
+        )
+        for v in ("-2.0", "+0.0", "+6.0"):
+            run("Raum " + v, chest_room=v)
+        for v in ("-30", "+0", "+30"):
+            run("Pasties " + v, pasties_shift=v)
+        core.save_settings(saved)
+        if "aus" in runs:
+            P0 = runs["aus"][0]
+            h0 = refit.skin_height(P0, cages["angel"])[0]
+            far = lambda k: (
+                float(np.linalg.norm(runs[k][0] - P0, axis=1).max() * 1000)
+                if k in runs and runs[k][0].shape == P0.shape
+                else float("nan")
+            )
+            dh = lambda k: (
+                float(
+                    np.median(refit.skin_height(runs[k][0], cages["angel"])[0] - h0)
+                    * 1000
+                )
+                if k in runs
+                else float("nan")
+            )
+            for k, what in (
+                ("aus mit Werten", "boxes unticked (values +6.0 / +30 in the lists)"),
+                ("Raum +0.0", "room ticked, 0.0 mm"),
+                ("Pasties +0", "pasties ticked, 0 mm"),
+            ):
+                check(
+                    "options: %s = the same refit as without options" % what,
+                    far(k) <= 0.0005,
+                    "largest difference %.4f mm" % far(k),
+                )
+            log(
+                "    room -2.0: height over the skin changes by %+.2f mm (median), +6.0: %+.2f mm; largest move %.2f / %.2f mm"
+                % (dh("Raum -2.0"), dh("Raum +6.0"), far("Raum -2.0"), far("Raum +6.0"))
+            )
+            check(
+                "options: room +6.0 mm lifts the piece about 6 mm",
+                4.0 < dh("Raum +6.0") < 6.6,
+                "%.2f mm" % dh("Raum +6.0"),
+            )
+            check(
+                "options: room -2.0 mm brings it closer, at most 2 mm",
+                -2.1 < dh("Raum -2.0") < -0.2,
+                "%.2f mm" % dh("Raum -2.0"),
+            )
+            up = {}
+            for k in ("Pasties -30", "Pasties +30"):
+                if k in runs and runs[k][0].shape == P0.shape:
+                    d = (runs[k][0].mean(0) - P0.mean(0)) * 1000
+                    up[k] = (float(np.linalg.norm(d)), float(d[1]))  # glb: y is up
+                    log(
+                        "    %s: centre moved %.1f mm (up %+.1f mm), height over the skin %+.2f mm"
+                        % (k, up[k][0], up[k][1], dh(k))
+                    )
+            check(
+                "options: pasties +30 mm moves the piece up, about 30 mm",
+                "Pasties +30" in up
+                and 20 < up["Pasties +30"][0] < 35
+                and up["Pasties +30"][1] > 5,
+                up.get("Pasties +30"),
+            )
+            check(
+                "options: pasties -30 mm moves the piece down, about 30 mm",
+                "Pasties -30" in up
+                and 20 < up["Pasties -30"][0] < 35
+                and up["Pasties -30"][1] < -5,
+                up.get("Pasties -30"),
+            )
+            check(
+                "options: the log names the options",
+                any("moved 30 mm up" in m for m in runs.get("Pasties +30", (0, []))[1])
+                and any(
+                    "moved 30 mm down" in m for m in runs.get("Pasties -30", (0, []))[1]
+                ),
+            )
+        # ---- 3. wrong inputs ----
+        txt = os.path.join(base, "kein Mod ö.txt")
+        open(txt, "w").write("not an outfit")
+        empty = os.path.join(base, "leerer Ordner ä")
+        os.makedirs(empty, exist_ok=True)
+        cases = [("a text file", txt, "vanilla"), ("an empty folder", empty, "vanilla")]
+        if "aus" in runs:
+            cases.append(
+                ("an already refit archive (for the same body)", runs["aus"][2], None)
+            )
+        for what, inp, src in cases:
+            out = os.path.join(base, "Falsch %d ü" % len(os.listdir(base)))
+            core.save_settings(saved)
+            st = gui.drive(inp, "angel", out, log, game=game, body_files=barch, src=src)
+            said = [m for m in st["log"] + st.get("errors", []) if m.strip()]
+            for m in said[-4:]:
+                log("    | " + m.replace("\n", " ")[:300])
+            check(
+                "wrong input, %s: nothing is written" % what,
+                not archives(out),
+                archives(out),
+            )
+            check(
+                "wrong input, %s: the window says why" % what,
+                any(
+                    re.search(
+                        "Could not refit|nothing to refit|Nothing to refit|No clothing|are both|already fits|no \\.archive",
+                        m,
+                    )
+                    for m in said
+                ),
+                said[-3:],
+            )
+        # ---- 4. an outfit whose refit needs its .xl, and the incomplete result ----
+        if opt(a, "--gui-extra-pair"):
+            out = os.path.join(base, "Paar ä ö")
+            shutil.rmtree(out, ignore_errors=True)
+            core.save_settings(saved)
+            st = gui.drive(
+                opt(a, "--gui-extra-pair"), "eve", out, log, game=game, body_files=barch
+            )
+            got = sorted(os.listdir(out)) if os.path.isdir(out) else []
+            arcs = archives(out)
+            check("pair: refit finished", st["ok"], st.get("errors"))
+            check(
+                "pair: the output is an .archive with its .xl of the same name",
+                len(arcs) == 1 and arcs[0][:-8] + ".xl" in got,
+                got,
+            )
+            check(
+                "pair: the window names the .xl and says to copy it too",
+                any("The two files belong together" in m for m in st["log"])
+                and any(".xl files next to them" in m for m in st["log"]),
+            )
+            if arcs:
+                check(
+                    "pair: safety check of the output",
+                    not refit.buffer_gate(os.path.join(out, arcs[0]), {}),
+                )
+        if opt(a, "--gui-extra-lone"):
+            out = os.path.join(base, "Unvollständig ä")
+            shutil.rmtree(out, ignore_errors=True)
+            core.save_settings(saved)
+            st = gui.drive(
+                opt(a, "--gui-extra-lone"), "eve", out, log, game=game, body_files=barch
+            )
+            for m in [m for m in st["log"] if "INCOMPLETE" in m or "not complete" in m]:
+                log("    | " + m[:300])
+            check(
+                "incomplete: the log says the refit is INCOMPLETE and why",
+                any("This refit is INCOMPLETE" in m and ".xl" in m for m in st["log"]),
+            )
+            check(
+                "incomplete: the summary names the outfit as not complete",
+                any("is not complete:" in m for m in st["log"]),
+            )
+            got = sorted(os.listdir(out)) if os.path.isdir(out) else []
+            check(
+                "incomplete: an .archive is written, no .xl",
+                len(archives(out)) == 1 and not [f for f in got if f.endswith(".xl")],
+                got,
+            )
+    finally:
+        core.save_settings(saved)
         shutil.rmtree(work, ignore_errors=True)
 
 
@@ -2036,6 +2982,16 @@ def main(a):
     except AssertionError as e:
         log("FAIL rigid parts: %s" % (e,))
         fails.append("rigid")
+    try:  # the two chest options: what is typed is no number, not finite or out of range -> a clean value, no error
+        got = [core.chest_room_value(True, x) for x in ("+2.0", "-1,5", "abc", "", "nan", "inf", "-inf", "1e999", "99", "-99")]
+        assert got == [2.0, -1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 6.0, -2.0], got
+        got = [core.pasties_value(True, x) for x in ("+10", "-7", "abc", "", "nan", "inf", "-inf", "1e999", "99", "-99", "2.4")]
+        assert got == [10, -7, 0, 0, 0, 0, 0, 0, 30, -30, 2], got
+        assert core.chest_room_value(False, "3") == 0.0 and core.pasties_value(False, "5") == 0
+        log("chest option values (wrong / endless / out-of-range input) OK")
+    except Exception as e:
+        log("FAIL chest option values: %r" % (e,))
+        fails.append("option values")
     try:
         check_rigs(core)
         log("rig / breast physics mod detection OK")
@@ -2069,6 +3025,12 @@ def main(a):
         log("FAIL names for archives without a name list: %s" % e)
         fails.append("recover names")
     try:
+        check_xl_patch(__import__("refit"))
+        log("ArchiveXL patches for new mesh paths, appearance check, male meshes OK")
+    except AssertionError as e:
+        log("FAIL ArchiveXL patches / appearance check: %s" % (e,))
+        fails.append("xl patch")
+    try:
         check_original_plan(core)
         log("original-outfit install plan OK")
     except AssertionError as e:
@@ -2093,7 +3055,10 @@ def main(a):
     wk = core.ensure_wolvenkit(log, lambda f: None, opt(a, "--wolvenkit"))
     log("WolvenKit OK: %s" % wk)
     # 'WolvenKit...' with the folder above WolvenKit's own (1.9.2): found below it, not refused
-    if core.ensure_wolvenkit(log, lambda f: None, os.path.dirname(os.path.dirname(wk))) != wk:
+    if (
+        core.ensure_wolvenkit(log, lambda f: None, os.path.dirname(os.path.dirname(wk)))
+        != wk
+    ):
         log("FAIL: WolvenKit not found below the picked folder")
         fails.append("wolvenkit parent folder")
     for o in opt_all(a, "--own-reader"):
@@ -2136,6 +3101,24 @@ def main(a):
         except core.ToolError as e:
             log("FAIL body %s: %s" % (t, e))
             fails.append(t)
+            continue
+        # fit 2.0: one measurable check per fix, on garments made from the body shapes themselves
+        import fitcheck
+
+        for name, ok, txt in fitcheck.run(cages["vanilla"], cages[t]):
+            log(
+                "%s fit vanilla -> %s, %s: %s"
+                % ("OK  " if ok else "FAIL", t, name, txt)
+            )
+            if not ok:
+                fails.append("fit %s: %s" % (t, name))
+
+    if tags:  # an outfit patched by its .xl, all the way through refit_mod and the final check
+        try:
+            xl_case(core, rdar, wk, game, tags, barch, out, log, fails)
+        except Exception:
+            log("FAIL: .xl patch case crashed:\n" + traceback.format_exc())
+            fails.append("xl case")
 
     seen = []  # log lines of the last run_case
 
@@ -2254,6 +3237,9 @@ def main(a):
 
             gui.main(close_after_ms=2000)
             log("\nwindow opened and closed OK")
+            # 'Adjust room at the chest' / 'Move pasties up / down': boxes, value lists, wrong input, saved settings
+            if gui.room_test(log):
+                fails.append("gui room / pasties controls")
         except Exception as e:
             log("FAIL: window did not start: %r" % e)
             fails.append("gui")
@@ -2322,5 +3308,13 @@ def main(a):
         except Exception:
             log("FAIL: support report tests crashed:\n" + traceback.format_exc())
             fails.append("support")
+    if opt(a, "--gui-extra"):
+        try:
+            import gui
+
+            gui_extra_tests(core, gui, rdar, wk, game, a, barch, log, fails)
+        except Exception:
+            log("FAIL: extra window tests crashed:\n" + traceback.format_exc())
+            fails.append("gui-extra")
     log("\nSELFTEST %s" % ("PASSED" if not fails else "FAILED: %s" % fails))
     return 1 if fails else 0

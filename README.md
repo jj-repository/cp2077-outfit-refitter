@@ -109,7 +109,8 @@ need a hand-made refit. Always look at the result in game.
 
 The results are saved in `Documents\Outfit Refitter` (or the folder you picked). Click **Open output folder** to see them.
 They are named after the body they fit, like `AngelRefit_<outfit>.archive`, `!!!EveRefit_<outfit>.archive` or
-`!!!VanillaRefit_<outfit>.archive`.
+`!!!VanillaRefit_<outfit>.archive`. Some refits come with an `.xl` file of the same name: keep the two together
+(the `.xl` gives the new meshes the outfit's materials; without it the game crashes when the item is put on).
 
 If you did not let the tool install them: copy the files into `<game folder>\archive\pc\mod`.
 The original outfit must be in your game as well. If it is missing, the log says so.
@@ -182,6 +183,7 @@ first to see what's inside.
 - **Files starting with `!!!`** replace the outfit's meshes. They load before most mods. If another mod
   also replaces the same clothing, whichever loads first wins.
 - **Re-run after updates**: if the clothing mod or your body mod gets updated, refit the outfit again.
+- **Known issue in 2.0: tops under jackets.** A refit top worn under a jacket can poke through the jacket in small spots. The top alone is fine.
 - **Gloves and tight hands** can look a little puffy, because the tool pushes clothing slightly out of the skin.
 - **Layered outfits** (since 1.6): when an outfit has several layers, for example a top, a shirt over it and a
   jacket, the tool keeps each layer 1 mm above the ones under it, so inner layers don't poke through. It reads the
@@ -338,6 +340,72 @@ Fit details (1.8):
   vertices up to 25 mm inside the vanilla body in the original). Below 35 cm, vertices that were inside the source
   body stay where the field puts them (a refit moves the feet 1-4 mm); before, 4,990 of them were pushed out.
 
+Fit details (2.0; `fit2.py`, `refit.ENGINE = 2`, the 1.9 engine stays as
+`ENGINE = 1`):
+- **Body to body by UV** (`fit2.corr`): the bodies share their skin textures, so the same UV in the same body part is
+  the same spot of the body. Every source body point goes to the target point with the same UV (located in the
+  target's UV triangles; among triangles that share a UV the nearest in 3D). The nearest-3D mapping of 1.0-1.9 was up
+  to 77 mm off on the chest (vanilla to Angel: the vanilla nipple landed 4 cm too high). Nearest-3D is only used where
+  the UV layouts differ (vanilla's lower legs and feet, Angel's and EVE's extra geometry), blended over 2 cm.
+- **Height-preserving** (`fit2.bind`, `carry`): a clothing vertex near the skin goes to the same spot of the target
+  body at its own original height over the skin; the offset turns with the skin's normal. Stacked layers keep their
+  order, second-skin items their 1 mm.
+- **Mesh-aware** (`fit2.solve`): that carry is a constraint only where it is reliable (within 0.5-2 cm of the skin, one
+  clear closest skin point, the height really kept on the target, no edge torn or reversed); the rest of the garment
+  follows on its own connectivity (Laplacian of the displacement, coincident vertices welded per LOD, short edges
+  stiffer). Triangles that turn over where a part is squeezed are ironed out (`unfold`).
+- **Sliding** (`fit2.slide`): skin is not cloth. The skin of a bigger breast is stretched very unevenly against a
+  smaller one's, and a garment locked to the same skin spots inherits that (Night Butterfly Dress: fishnet triangles
+  x0.47 .. x2.35 in area, the author's own Angel version x1.05 .. x1.36). An as-rigid-as-possible solve lets every
+  vertex slide along the skin on the plane of its own height, with a weak pull to its anatomical place (pasties stay
+  on the nipple): x0.73 .. x1.81, unevenly stretched triangles 45 % -> 16 % (author's: 5 %), and the hand-made
+  versions get closer (16 garments: 6.75 -> 6.08 mm).
+- **Rigid parts** (`fit2.rigid_parts`): a connected part whose vertices all have the same skin weights moves by one
+  best-fit rigid transform when it is small (under 6 cm) or when its soft fit is rigid anyway (within 2 mm: a knife,
+  a bag); if it would still clip, it gets the soft fit. A bra hanging on one bone is soft (it ended 34-39 % inside
+  Angel as a rigid part).
+- **Squashed shape** (`fit2.squashed`): the GarmentSupport morph is made in the same fit as the rest shape: rest
+  result + the author's squash turned as the skin under it turned, scaled with the garment's own stretch, shortened
+  where it would fold more than the author's or go below the body as it shows crushed. Triangles turned between rest
+  and squashed shape: Shoulder twist top 167 (original 352, 1.9 engine 783), Polly Dress 691 (1,567 / 1,913).
+- **Layers**: an outer layer's lift over the inner layers is spread over its mesh (`refit.layer_push_mesh`).
+- **The body as the game shows it**: heights are measured over the source body as authored, visibility over the body
+  as shown (crushed by its GarmentSupport key where the garment's cap paint is black). A vertex the game showed
+  never gets a negative height on the target (floor 0.5-1 mm, `fit2.floors`); hidden parts stay hidden. The
+  squashed (garment-support) shape is cleared against the target body with its key applied.
+- **Chest** (`chest_role`, bodies.json `cap_red`): a garment worn next to the skin on the chest (outfit slot
+  Under / Inner, or without a slot a median height under 12 mm) is fit to the normal chest alone. Outer layers
+  and items of other slots clear both chest shapes. Tested in game (2026-11, Angel and EVE): under a chest item
+  the game shows the normal chest; the same top with its cap painted red, with the author's black cap and without
+  any garment support looked the same, so the author's garment-support paint is left as it is (`refit.PAINT_CAP =
+  False`; with True the cap is painted red over the part of the body its GarmentSupport key moves, which
+  WolvenKit's import writes: checked by re-export).
+- **Nipples** (`with_nipples`, bodies.json `nipples`): the surface to clear includes the base game's nipple patch,
+  which the Hyst bodies leave at the vanilla chest's place (up to 2.6 mm out of Angel's upper breast). No radial
+  `nipple_room`, no `underbreast_room`, no 4 mm floor in this engine.
+- **Adjust room at the chest** (option, off by default; `fit2.chest_room`, `--chest-room`): -2.0 .. +6.0 mm in 0.5 mm
+  steps. Every vertex over the chest zone (within 9 cm of a breast tip, fading out to 14 cm) moves that much further
+  from (or closer to) the skin, all layers and the squashed shape alike; outside the zone nothing moves. Tighter stops
+  at 0.2 mm over every shown chest shape. Unticked or 0.0 is exactly the normal fit.
+- **Move pasties up / down** (option, off by default; `fit2.chest_pieces`, `shift_pieces`, `--pasties-shift`): -30 ..
+  +30 mm. Only for a mesh that as a whole lies over the chest and is under 12 cm per breast side (pasties, nipple
+  covers, tape): the piece slides that far along the skin (the skin point under its centre walks up the surface in
+  1 mm steps, the piece follows as a rigid body and every vertex gets its own height back). Tops and bras are never
+  touched; the log names the moved pieces.
+- **Normals and tangents** turn with the per-vertex rotation of the deformation (`fit2.rotations`).
+- **Fit report** per mesh in the log (`fit2.report`): % inside the shown body, lowest / median clearance, worst edge
+  stretch, triangles turned, layer flips, rigid parts.
+- First-person arm pieces (`_fpp` meshes more than 15 mm off the body shape) are copied unchanged.
+- Self-test: `fitcheck.py` (one check per fix on garments made from the body shapes) runs after each body shape.
+
+Details (2.0):
+- **New fit** (fit 2.0, see 'Fit details (2.0)' above) with a fit report per mesh in the log.
+- **Two options**, both off by default: 'Adjust room at the chest' (-2.0 .. +6.0 mm) and 'Move pasties up / down'
+  (-30 .. +30 mm).
+- **The refit's `.xl` file**: new mesh paths get the outfit's ArchiveXL patches, a final check refuses a mesh that
+  would crash the game, `.xl` / `.archive` pairs are installed, zipped and uninstalled together, an incomplete
+  refit is reported as such (see 'Output' below). PyYAML is a new dependency (bundled in the Windows version).
+
 Details (1.9.2):
 - **Zip per refit** (`make_zip`, GUI box, CLI `--zip`): `run_batch` writes `<refit>.zip` next to the refit with the
   archive at `archive/pc/mod/` (written as `.part`, then renamed).
@@ -402,7 +470,21 @@ Output (`<Body>` = the target: `Angel`, `Eve`, `Vanilla`):
   archive is named `!!!<Body>Refit_<outfit>.archive`, so it loads before the outfit.
 - Static meshes (no `{body}` support in the mod) are replaced in place: `!!!<Body>Refit_<outfit>.archive`. For
   vanilla this is how an Angel-only or EVE-only outfit fits the normal body.
-  No `.xl` file is needed for either.
+- ArchiveXL resource patches: many outfits keep the appearances and materials of all body versions in one small
+  mesh that the outfit's `.xl` patches into a list of mesh paths (`resource: patch:`). ArchiveXL matches that list
+  by exact path, so a refit at a new path gets nothing and a mesh without appearances crashes the game when worn.
+  The tool reads the outfit's `.xl` files (next to the `.archive`) and writes `<refit>.xl` that adds each new path
+  to the patches (and `fix`) of the mesh it was made from. The `.xl` is read the way ArchiveXL reads it (every value
+  is text, a key written twice counts twice, scopes, both `link` forms). A patch counts only when its file can give
+  appearances: it is looked up in the outfit and then in the game's archives; if it holds none the mesh is skipped,
+  if it is nowhere (it comes with another mod the outfit needs) the mesh is refit and the log names the file.
+  A new mesh without appearances whose patch is not known (the `.xl` was not next to a lone `.archive`, or it could
+  not be read) is left out, and the log and the result say that the refit is incomplete and why.
+  Only a real file counts as the outfit's own version for a body: a path the `.xl` merely links to another body's
+  mesh (`resource: link:`, e.g. `..._angel.mesh` to `..._ebb.mesh`) is refit from the source body like a missing
+  one; the real file then takes the link's place (ArchiveXL writes "Link ... is an existing resource" into its log
+  and uses the file). The final check compares appearances, material lists and the material buffer of every refit
+  mesh with its source and refuses an archive with an unpatched mesh without appearances.
 
 ### Body shapes, WolvenKit and the Oodle DLL
 
@@ -455,8 +537,8 @@ python outfit_refitter.py --refit "Some Outfit-ANGEL.archive" --from angel --bod
 build_exe.bat
 ```
 
-This creates a local `.venv`, installs numpy, scipy and PyInstaller, and runs
-`PyInstaller --onedir --windowed --name OutfitRefitter --add-data "bodies.json;." --add-data "README.md;." --add-data "LICENSE;." outfit_refitter.py`.
+This creates a local `.venv`, installs numpy, scipy, PyYAML and PyInstaller, and runs
+`PyInstaller --onedir --windowed --name OutfitRefitter --version-file version_info.txt --add-data "bodies.json;." --add-data "README.md;." --add-data "LICENSE;." outfit_refitter.py`.
 The result is `dist\OutfitRefitter\` (zip that folder for release).
 
 ### Self-test
@@ -487,7 +569,8 @@ safety check, lists the output archive and, if a reference refit is given, print
 vanilla and compares with the original. `--gui-source <folder> --gui-source-outfit <Angel outfit>
 [--gui-source-body eve=<EVE download>]` tests **Outfit made for** in the real window (pre-fill, wrong source,
 same body twice, missing source body, body from a download, **Body file...**, closing mid-refit). `--gui` also opens
-the window for two seconds. `--gui-install <folder> --gui-install-outfit <outfit>=><expected file>;...` runs the
+the window for two seconds and tests the two chest options' controls (tick boxes, value lists, wrong input, saved
+settings). `--gui-install <folder> --gui-install-outfit <outfit>=><expected file>;...` runs the
 Install tests in the real window on a fake game folder it makes in `<folder>` (original missing, original already
 there, Install unticked, Uninstall, closing the window mid-refit); the real game folder is only read.
 `--support <folder> --support-outfit <outfit>` (three times) tests **Report Issues** in the real window on two

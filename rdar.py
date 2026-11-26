@@ -107,9 +107,35 @@ def crc64(b):  # CRC-64/XZ, what the archive index stores
     return c ^ 0xFFFFFFFFFFFFFFFF
 
 
+_LOW = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def low(s):
+    """Lower case as the game hashes depot paths: A-Z only, every other character as it is."""
+    return s.translate(_LOW)
+
+
+def find_file(archives, path):
+    """The CR2W objects part of depot file `path` from the first of the archives that holds it -> (bytes, archive),
+    or (None, None). An archive that can't be read is passed over."""
+    h = fnv(path)
+    for a in archives:
+        try:
+            r = Rdar(a)
+            for f in r.files:
+                if f[0] == h:
+                    off, zs, size = r.segs[f[3]]
+                    with open(a, "rb") as fh:
+                        fh.seek(off)
+                        return seg_raw(fh.read(zs), size), a
+        except (OSError, ValueError, RuntimeError, IndexError, struct.error):
+            continue
+    return None, None
+
+
 def fnv(s):
     h = 0xCBF29CE484222325
-    for b in s.lower().replace("/", "\\").encode():
+    for b in low(s).replace("/", "\\").encode():
         h = ((h ^ b) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
     return h
 

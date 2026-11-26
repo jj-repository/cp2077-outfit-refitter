@@ -607,6 +607,8 @@ def build(session, settings, game, out, outfits, refits):
             "Zip for Vortex / MO2: %s"
             % ("ticked" if settings.get("make_zip") else "not ticked")
         )
+        L.append("Room at the chest: %s" % ("%+.1f mm" % settings["chest_room"] if settings.get("chest_room") else "not adjusted"))
+        L.append("Move pasties up / down: %s" % ("%+d mm" % settings["pasties_shift"] if settings.get("pasties_shift") else "not moved"))
         L.append("Output folder: %s" % out)
         L.append("Game folder: %s" % game)
         wk = core.wk_exe()

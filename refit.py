@@ -26,17 +26,42 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 import rdar
-from core import ToolError, bodies, body_name, run, shape_cage, xl_name
+from core import (
+    REFIT_NAME,
+    ToolError,
+    bodies,
+    body_name,
+    run,
+    shape_cage,
+    xl_beside,
+    xl_name,
+)
 
 HELPER = re.compile(
     r"(save_material|material_mesh|_materials?\.mesh$|_shadow\.mesh$|[\\/_]props?[\\/_])",
     re.I,
 )
 MALE = re.compile(
-    r"(^|[\\/_])pma([_\\/.]|$)|_m_base_body|_male[_.]|_m_(adonis|aeiou|atlas|gymfiend|lush|big|vanilla)\b"
-    r"|_mbb",
+    r"(^|[\\/_])p?ma([_\\/.]|$)|[\\/_]m_base_body|_male[_.]"
+    r"|[\\/_]m_(adonis|aeiou|atlas|gymfiend|lush|big|vanilla)\b|_mbb",
     re.I,
-)
+)  # 'ma' / 'pma': the game's own names (man average, player man average), as in t1_001_ma_shirt, t0_000_pma_base
+
+
+def is_male(k, meshes):
+    """Is mesh path k for male V? Named so, or the same name with the word 'm' ('ma', 'pma') turned into 'w' ('wa',
+    'pwa') is another mesh of the outfit (m_base_body / w_base_body, vest_m / vest_w, m / w, x_ma_y / x_wa_y).
+    Not when 's' or 'l' stands there in yet another mesh: then 'm' is a size (dress_s / dress_m / dress_l)."""
+    if MALE.search(k):
+        return True
+    d, _, b = k.rpartition("\\")
+    rx = r"(^|_)(p?)m(a?)(?=[_.])"
+    there = lambda c: (d + "\\" if d else "") + re.sub(rx, r"\1\2%s\3" % c, b) in meshes
+    if not re.search(rx, b) or there("s") or there("l"):
+        return False
+    return there("w")
+
+
 BODY_SUFFIX = re.compile(
     r"_(base_body|eve|ebb|ebbp|ebbrb|ebbprb|rb|evb|lush|flat|small|solo\w*|angel|vanilla)$",
     re.I,
@@ -82,11 +107,22 @@ def write(d, j, bin_off, ai, arr):
     a["min"], a["max"] = f.min(0).tolist(), f.max(0).tolist()
 
 
+def spec_opts(spec):
+    """One body glb spec 'file.glb|hide=0,1,2|gs|extra' -> (path, hidden submeshes, gs, extra). hide: a chest shape
+    add-on replaces those submeshes (as the body mod's .xl does with hide: [0, 1, 2]); gs: the body with its
+    GarmentSupport shape key applied (the shape the game shows under a garment that crushes it); extra: geometry
+    that is shown on the body but has no part in the body-to-body correspondence (nipple meshes)."""
+    path, *opts = spec.split("|")
+    hide = set()
+    for o in opts:
+        if o.startswith("hide="):
+            hide = {int(x) for x in o[5:].split(",")}
+    return path, hide, "gs" in opts, "extra" in opts
+
+
 def lod1(spec):
-    """(glb bytes, json, bin offset, [LOD 1 meshes]) of one body glb. spec 'file.glb|hide=0,1,2' leaves out those
-    submeshes (a chest shape add-on replaces them, as the body mod's .xl does with hide: [0, 1, 2])."""
-    path, _, opt = spec.partition("|")
-    hide = {int(x) for x in opt[5:].split(",")} if opt.startswith("hide=") else set()
+    """(glb bytes, json, bin offset, [LOD 1 meshes]) of one body glb spec (spec_opts)."""
+    path, hide, _, _ = spec_opts(spec)
     d, j, b = load(path)
     ms = []
     for m in j["meshes"]:
@@ -97,16 +133,34 @@ def lod1(spec):
     return d, j, b, ms
 
 
+def body_prims(paths):
+    """Every LOD 1 primitive of a body shape (glb specs joined with ';'), in the order all body arrays use:
+    -> [(part key (file stem, submesh), glb bytes, json, bin offset, primitive, positions, spec is 'extra')]."""
+    out = []
+    for p in paths.split(";"):
+        path, _, gs, extra = spec_opts(p)
+        stem = os.path.splitext(os.path.basename(path))[0].lower()
+        d, j, b, ms = lod1(p)
+        for m in ms:
+            k = re.match(r"submesh_(\d+)", m.get("name") or "")
+            tn = (m.get("extras") or {}).get("targetNames", [])
+            for pr in m["primitives"]:
+                P = read(d, j, b, pr["attributes"]["POSITION"])
+                if gs and "GarmentSupport" in tn and pr.get("targets"):
+                    t = pr["targets"][tn.index("GarmentSupport")].get("POSITION")
+                    if t is not None:
+                        P = P + read(d, j, b, t)
+                out.append(((stem, int(k.group(1)) if k else 0), d, j, b, pr, P, extra))
+    return out
+
+
 def body_points(paths):
     """LOD 1 positions + normals of a body shape (one glb or several joined with ';')."""
     pts, nrm = [], []
-    for p in paths.split(";"):
-        d, j, b, ms = lod1(p)
-        for m in ms:
-            for pr in m["primitives"]:
-                pts.append(read(d, j, b, pr["attributes"]["POSITION"]))
-                if "NORMAL" in pr["attributes"]:
-                    nrm.append(read(d, j, b, pr["attributes"]["NORMAL"]))
+    for _, d, j, b, pr, P, _ in body_prims(paths):
+        pts.append(P)
+        if "NORMAL" in pr["attributes"]:
+            nrm.append(read(d, j, b, pr["attributes"]["NORMAL"]))
     return np.vstack(pts), (np.vstack(nrm) if nrm else None)
 
 
@@ -115,7 +169,7 @@ _SHAPE = {}
 
 def forget_bodies():
     """Empty every cache that holds body shapes (a body was read again from a changed body file)."""
-    for c in (_SHAPE, _FIELD, _SURF, _BSKIN, _TREES, _TIPS):
+    for c in (_SHAPE, _FIELD, _SURF, _SUV, _BSKIN, _TREES, _TIPS, _CORR):
         c.clear()
 
 
@@ -128,6 +182,7 @@ def shape(paths):
 
 
 _FIELD = {}
+_CORR = {}  # fit2: body-to-body correspondences and UV locators
 
 
 def field(src, tgt):
@@ -297,6 +352,51 @@ def layer_push(Q, inner, tgt, gap=0.001, reach=0.006):
     return int(lifted.sum())
 
 
+def layer_push_mesh(Qs, Fs, inner, tgt, gap=0.001, reach=0.006):
+    """layer_push() for the primitives of one LOD of one mesh (Qs: [positions], changed in place; Fs: [triangles]),
+    with the lifts spread over the mesh: a vertex that must rise over the inner layer takes its neighbours along
+    (LAYER_SPREAD: 90 % per ring, 16 rings; coincident vertices welded), so the outer layer is not dented vertex by vertex and
+    fewer triangles turn over. Every vertex still ends at least `gap` over the inner layer. -> vertices lifted."""
+    import fit2
+
+    if inner is None or not len(inner):
+        return 0
+    hi, fi, _ = skin_height(inner, tgt)
+    keep = np.abs(hi) < 0.06
+    if not keep.any():
+        return 0
+    hi, ftree = hi[keep], cKDTree(fi[keep])
+    cut = np.cumsum([len(Q) for Q in Qs])[:-1]
+    X0 = np.vstack(Qs)
+    F = np.vstack([f + o for f, o in zip(Fs, np.concatenate([[0], cut]))])
+    X, inv, E = fit2.weld(X0, F)
+    A = fit2.laplacian(len(X), E)[1] if len(E) else None
+    deg = np.maximum(np.asarray(A.sum(1)).ravel(), 1)[:, None] if A is not None else None
+    lifted = np.zeros(len(X), bool)
+    for _ in range(4):  # a lifted vertex can land over another skin spot: again until nothing moves
+        ho, fo, n = skin_height(X, tgt)
+        need = np.zeros(len(X))
+        for i, L in enumerate(ftree.query_ball_point(fo, reach)):
+            if len(L) >= 3 and abs(ho[i]) < 0.06:
+                need[i] = hi[L].max() + gap - ho[i]
+        m = need > 1e-6
+        if not m.any():
+            break
+        req = np.zeros_like(X)
+        req[m] = n[m] * need[m][:, None]
+        O = req.copy()
+        if A is not None:
+            for _ in range(LAYER_SPREAD[0]):
+                S = LAYER_SPREAD[1] * (A @ O) / deg
+                own = np.linalg.norm(req, axis=1) >= np.linalg.norm(S, axis=1)
+                O = np.where(own[:, None], req, S)
+        X += O
+        lifted |= m
+    for Q, part in zip(Qs, np.split(X[inv], cut)):
+        Q[:] = part
+    return int(lifted[inv].sum())
+
+
 def closest_on_triangles(X, A, B, C):
     """Barycentric (u, v, w) of the point of each triangle (A, B, C) closest to X (Ericson, Real-Time Collision
     Detection 5.1.5; vectorised over any leading shape)."""
@@ -347,20 +447,30 @@ _SURF = {}
 def surface(paths):
     """(positions, unit normals, triangles, kd-tree of triangle centres) of a body's LOD 1 surface, cached."""
     if paths not in _SURF:
-        Ps, Ns, Fs, o = [], [], [], 0
-        for p in paths.split(";"):
-            d, j, b, ms = lod1(p)
-            for m in ms:
-                for pr in m["primitives"]:
-                    P = read(d, j, b, pr["attributes"]["POSITION"])
-                    Ps.append(P)
-                    Ns.append(read(d, j, b, pr["attributes"]["NORMAL"]))
-                    Fs.append(read_index(d, j, b, pr["indices"]).reshape(-1, 3) + o)
-                    o += len(P)
+        Ps, Ns, Fs, UVs, part, keys, o = [], [], [], [], [], [], 0
+        for key, d, j, b, pr, P, extra in body_prims(paths):
+            Ps.append(P)
+            Ns.append(read(d, j, b, pr["attributes"]["NORMAL"]))
+            Fs.append(read_index(d, j, b, pr["indices"]).reshape(-1, 3) + o)
+            uv = pr["attributes"].get("TEXCOORD_0")
+            UVs.append(read(d, j, b, uv) if uv is not None else np.zeros((len(P), 2)))
+            part.append(np.full(len(P), -1 if extra or uv is None else len(keys)))
+            keys.append(key)
+            o += len(P)
         P, N, F = np.vstack(Ps), np.vstack(Ns), np.vstack(Fs)
-        N /= np.linalg.norm(N, axis=1, keepdims=True)
+        N /= np.maximum(np.linalg.norm(N, axis=1, keepdims=True), 1e-12)
         _SURF[paths] = (P, N, F, cKDTree(P[F].mean(1)))
+        _SUV[paths] = (np.vstack(UVs), np.concatenate(part), keys)
     return _SURF[paths]
+
+
+_SUV = {}
+
+
+def surface_uv(paths):
+    """(UV per vertex, part number per vertex (-1: extra geometry), [part key (file stem, submesh)]) of surface()."""
+    surface(paths)
+    return _SUV[paths]
 
 
 def read_index(d, j, b, ai):
@@ -584,10 +694,105 @@ def copy_weights(d, j, b, pr, Q, tgt, near=0.015, far=0.04):
     return int(ok.sum())
 
 
+ENGINE = 2  # 2: fit 2.0 (fit2.py); 1: the 1.9 engine (move), kept for comparison
+# Paint the garment-support cap red over the chest of inner chest garments (bodies.json 'cap_red')? Off: tested in
+# game on Angel (2026-11), the same top with the cap red, with the author's black cap and without garment support
+# looked the same (the game shows the normal chest under a chest item either way), so the author's garment-support
+# data stays as it is.
+PAINT_CAP = False
+LAYER_SPREAD = (16, 0.9)  # rings of neighbours / share passed on per ring (Pt5 jacket: 561 -> 493 turned triangles)
+LAYER_MESH = True  # spread the lift over inner layers over the mesh (layer_push_mesh); False: vertex by vertex
+
+
+def gs_spec(spec):
+    """The body spec with every part's GarmentSupport shape key applied: the body as shown under a garment that
+    crushes it."""
+    return ";".join(p if spec_opts(p)[2] else p + "|gs" for p in spec.split(";"))
+
+
+def crush_zone(spec):
+    """Per vertex of surface(spec): True where the body's GarmentSupport shape key moves it by more than 0.1 mm."""
+    k = ("zone", spec)
+    if k not in _CORR:
+        _CORR[k] = (
+            np.linalg.norm(surface(gs_spec(spec))[0] - surface(spec)[0], axis=1) > 1e-4
+        )
+    return _CORR[k]
+
+
+def refit_lods(parts, src, tgt, inner=None, shown=None, extra=0.0, shift=0.0, notes=None):
+    """Fit 2.0 for the parts of one mesh: parts = [dict(lod, P, F (triangles or None), cap (red channel of the
+    garment-support cap paint per vertex, or None), sig (skin weight rows or None))]. Parts of one LOD are solved
+    together (shared seams stay closed). shown: target body shapes to clear (default [tgt]). A part may carry
+    'delta': its GarmentSupport morph (squashed minus rest); the squashed shape is then made from the rest result
+    in the same fit (fit2.squashed). Whether the mesh slides along the skin is decided once, for its first LOD.
+    notes: a list that gets 'shifted' (a small chest piece was moved), 'slide: too big' (sliding skipped).
+    -> ([new positions], lifted out of the skin, lifted over the inner layers, [rotation per vertex], rigid parts,
+    [original height over the source skin per vertex], [squashed positions or None per part])."""
+    import fit2
+
+    out, rots, h0s = [None] * len(parts), [None] * len(parts), [None] * len(parts)
+    sqs, slide_ok = [None] * len(parts), None
+    pushed = lifted = rigid = 0
+    bs = fit2.base(src)
+    for lod in sorted({p["lod"] for p in parts}):
+        ix = [i for i, p in enumerate(parts) if p["lod"] == lod]
+        grp = [parts[i] for i in ix]
+        # the source body as the game showed it under this garment: crushed where the garment's cap paint is black
+        hv = None
+        if any(p.get("cap") is not None for p in grp) and crush_zone(bs).any():
+            hv = []
+            for p in grp:
+                hb = fit2.height(p["P"], bs)[0]
+                if p.get("cap") is not None:
+                    hb = np.where(
+                        p["cap"] < 0.5, fit2.height(p["P"], gs_spec(bs))[0], hb
+                    )
+                hv.append(hb)
+        sig = [p.get("sig") for p in grp]
+        Qs, info = fit2.fit(
+            [p["P"] for p in grp],
+            [p.get("F") for p in grp],
+            src,
+            tgt,
+            shown,
+            hv,
+            sig if all(x is not None for x in sig) else None,
+            extra,
+            shift,
+            [p.get("delta") for p in grp],
+            slide_ok,
+        )
+        if slide_ok is None and all(p.get("F") is not None for p in grp):
+            slide_ok = info["slid"] is True  # the other LODs of this mesh follow
+        if notes is not None and info.get("shifted"):
+            notes.append("shifted")
+        if notes is not None and info.get("slid") == "too big" and "slide: too big" not in notes:
+            notes.append("slide: too big")
+        sq = info.get("squashed") or [None] * len(ix)
+        rigid += info["rigid"]
+        before = [Q.copy() for Q in Qs] if inner else None
+        if inner and LAYER_MESH and all(p.get("F") is not None for p in grp):
+            lifted += layer_push_mesh(Qs, [p["F"] for p in grp], inner.get(lod, inner.get(1)), tgt)
+        elif inner:
+            for Q in Qs:
+                lifted += layer_push(Q, inner.get(lod, inner.get(1)), tgt)
+        for k, (i, Q, m, r, h, g) in enumerate(zip(ix, Qs, info["lifted"], info["rot"], info["h0"], sq)):
+            if inner and g is not None:  # the squashed shape is lifted over the inner layers by the same amount
+                g += Q - before[k]
+            out[i], rots[i], h0s[i], sqs[i] = Q, r, h, g
+            pushed += int(m.sum())
+    return out, pushed, lifted, rots, rigid, h0s, sqs
+
+
 def refit_parts(parts, src, tgt, inner=None, also=None):
-    """move() + layer_push() for the parts of one mesh: parts = [(LOD key, positions)], inner = {LOD key: inner layer
-    positions} (a LOD the inner layers lack uses their LOD 1). -> ([new positions], pushed out of the skin, lifted
-    over the inner layers)."""
+    """The refit of the parts of one mesh without connectivity (the own mesh reader): parts = [(LOD key,
+    positions)], inner = {LOD key: inner layer positions} (a LOD the inner layers lack uses their LOD 1).
+    -> ([new positions], pushed out of the skin, lifted over the inner layers)."""
+    if ENGINE == 2:
+        shown = [tgt] + ([also] if also else [])
+        r = refit_lods([dict(lod=lod, P=P) for lod, P in parts], src, tgt, inner, shown)
+        return r[0], r[1], r[2]
     out, pushed, lifted = [], 0, 0
     for lod, P in parts:
         Q, n = move(P, src, tgt, also=also)
@@ -604,11 +809,40 @@ def lod_of(name):
     return int(m.group(1)) if m else 1
 
 
-def refit_glb(gar, out, src, tgt, inner=None, weights=False, also=None):
-    """refit_parts() applied to a WolvenKit glb export. Only POSITION bytes change (and with weights=True the skin
-    weights near the body, copy_weights): indices, UVs and normals stay identical. The GarmentSupport morph (the
-    squashed shape the game shows while another layer is worn over the garment) is refit too: its delta is made
-    again from the refit squashed shape, else it would squash the garment into the target body.
+CAP, GSW = "_GARMENTSUPPORTCAP", "_GARMENTSUPPORTWEIGHT"
+
+
+def save_glb(out, d, j):
+    jb = json.dumps(j, separators=(",", ":")).encode()
+    jb += b" " * ((4 - len(jb) % 4) % 4)
+    rest = d[20 + struct.unpack_from("<I", d, 12)[0] :]
+    body = struct.pack("<II", len(jb), 0x4E4F534A) + jb + rest
+    open(out, "wb").write(struct.pack("<III", 0x46546C67, 2, 12 + len(body)) + body)
+
+
+def refit_glb(
+    gar,
+    out,
+    src,
+    tgt,
+    inner=None,
+    weights=False,
+    also=None,
+    shown=None,
+    red_cap=False,
+    stats=None,
+    extra=0.0,
+    shift=0.0,
+):
+    """The refit of a WolvenKit glb export. POSITION changes (and with weights=True the skin weights near the body,
+    copy_weights); indices and UVs stay identical. Fit 2.0 also turns NORMAL / TANGENT with the surface and can
+    paint the garment-support cap red over the part of the body its GarmentSupport key moves (red_cap: the garment
+    then leaves the body there as it is, so the body keeps the shape the garment is fit to).
+    The GarmentSupport morph (the squashed shape the game shows while another layer is worn over the garment) is
+    refit too: its delta is made again from the refit squashed shape, fit to the target body as it shows crushed.
+    shown: target body shapes the rest shape must clear (default: tgt and `also`).
+    extra: 'Adjust room at the chest' in m (fit2.chest_room; the squashed shape gets the same lift), fit 2.0 only.
+    stats: a dict that gets the fit report (fit2.report) of the highest LOD.
     -> (vertices, pushed out of the skin, lifted over inner layers, [(LOD, new positions)], vertices that got the
     body's weights, primitives whose garment support was refit)."""
     d, j, b = load(gar)
@@ -622,23 +856,99 @@ def refit_glb(gar, out, src, tgt, inner=None, weights=False, also=None):
     }
     acc = [(lod, pr["attributes"]["POSITION"]) for lod, pr in prims]
     parts = [(lod, read(d, j, b, ai)) for lod, ai in acc]
-    Qs, inside, lifted = refit_parts(parts, src, tgt, inner, also)
     copied = gs = 0
-    for (_, ai), (_, pr), (_, P), Q in zip(acc, prims, parts, Qs):
-        if id(pr) in gsk and gsk[id(pr)] < len(pr["targets"]):
-            ti = pr["targets"][gsk[id(pr)]].get("POSITION")
-            if ti is not None:
-                D = read(d, j, b, ti)
-                write(d, j, b, ti, move(P + D, src, tgt, also=also)[0] - Q)
+    if ENGINE != 2:
+        Qs, inside, lifted = refit_parts(parts, src, tgt, inner, also)
+        for (_, ai), (_, pr), (_, P), Q in zip(acc, prims, parts, Qs):
+            if id(pr) in gsk and gsk[id(pr)] < len(pr["targets"]):
+                ti = pr["targets"][gsk[id(pr)]].get("POSITION")
+                if ti is not None:
+                    D = read(d, j, b, ti)
+                    write(d, j, b, ti, move(P + D, src, tgt, also=also)[0] - Q)
+                    gs += 1
+            write(d, j, b, ai, Q)
+            if weights:
+                copied += copy_weights(d, j, b, pr, Q, tgt)
+    else:
+        import fit2
+
+        full = []
+        for (lod, pr), (_, P) in zip(prims, parts):
+            at = pr["attributes"]
+            sk = prim_skin(d, j, b, pr)
+            full.append(
+                dict(
+                    lod=lod,
+                    P=P,
+                    F=read_index(d, j, b, pr["indices"]).reshape(-1, 3)
+                    if "indices" in pr
+                    else None,
+                    cap=read_vals(d, j, b, at[CAP])[:, 0] if CAP in at else None,
+                    sig=np.hstack([sk[0], sk[1]]) if sk else None,
+                )
+            )
+        if any(p["sig"] is None for p in full):
+            for p in full:
+                p["sig"] = None
+        else:  # one width for all (primitives can have 4 or 8 influences)
+            k = max(p["sig"].shape[1] for p in full)
+            for p in full:
+                p["sig"] = np.hstack(
+                    [p["sig"], np.zeros((len(p["sig"]), k - p["sig"].shape[1]))]
+                )
+        shown = shown or ([tgt] + ([also] if also else []))
+        # the squashed (GarmentSupport) shape comes out of the same fit as the rest shape: rest result + the author's
+        # squash delta turned with the surface, kept above the target body as it shows crushed (fit2.squashed)
+        sq = [
+            (i, pr["targets"][gsk[id(pr)]].get("POSITION"))
+            for i, (_, pr) in enumerate(prims)
+            if id(pr) in gsk and gsk[id(pr)] < len(pr["targets"])
+        ]
+        sq = [(i, ti) for i, ti in sq if ti is not None]
+        for i, ti in sq:
+            full[i]["delta"] = read(d, j, b, ti)
+        notes = []
+        Qs, inside, lifted, rots, rigid, h0s, sqs = refit_lods(full, src, tgt, inner, shown, extra, shift, notes)
+        if stats is not None:
+            if "shifted" in notes:
+                stats["shifted"] = True
+            if "slide: too big" in notes:
+                stats["slide_skipped"] = True
+        for i, ti in sq:
+            if sqs[i] is not None:
+                write(d, j, b, ti, sqs[i] - Qs[i])
                 gs += 1
-        write(d, j, b, ai, Q)
-        if weights:
-            copied += copy_weights(d, j, b, pr, Q, tgt)
-    jb = json.dumps(j, separators=(",", ":")).encode()
-    jb += b" " * ((4 - len(jb) % 4) % 4)
-    rest = d[20 + struct.unpack_from("<I", d, 12)[0] :]
-    body = struct.pack("<II", len(jb), 0x4E4F534A) + jb + rest
-    open(out, "wb").write(struct.pack("<III", 0x46546C67, 2, 12 + len(body)) + body)
+        zone = crush_zone(fit2.base(tgt)) if red_cap else None
+        for (_, ai), (_, pr), Q, Rm in zip(acc, prims, Qs, rots):
+            at = pr["attributes"]
+            write(d, j, b, ai, Q)
+            for k in ("NORMAL", "TANGENT"):
+                if k in at:
+                    V = read(d, j, b, at[k])
+                    V[:, :3] = np.einsum("nij,nj->ni", Rm, V[:, :3])
+                    write(d, j, b, at[k], V)
+            if red_cap and CAP in at and zone.any():
+                # red where the vertex sits over the part of the body its GarmentSupport key moves
+                fv = skin_height(Q, fit2.base(tgt), faces=True)[3]
+                C = read_vals(d, j, b, at[CAP])
+                C[zone[fv].any(1), 0] = 1.0
+                write_vals(d, j, b, at[CAP], C)
+            if weights:
+                copied += copy_weights(d, j, b, pr, Q, tgt)
+        if stats is not None:
+            top = min(p["lod"] for p in full)
+            l1 = [i for i, p in enumerate(full) if p["lod"] == top]
+            stats.update(
+                fit2.report(
+                    [full[i]["P"] for i in l1],
+                    [Qs[i] for i in l1],
+                    [full[i]["F"] for i in l1],
+                    [h0s[i] for i in l1],
+                    shown,
+                )
+            )
+            stats["rigid"] = rigid
+    save_glb(out, d, j)
     return (
         sum(len(P) for _, P in parts),
         inside,
@@ -1060,12 +1370,415 @@ def own_refit(m, Q):
     return new
 
 
-def buffer_gate(arch, src_of):
-    """Final check of the packed archive -> list of problems (empty = safe to use)."""
+# ---------------- ArchiveXL .xl files: which meshes get their materials at load time ----------------
+#
+# Many outfits keep the materials and appearances of all their body versions in one small mesh and let ArchiveXL add
+# them when the game loads a mesh:  resource: patch: {materials.mesh: [base_body.mesh, ebb.mesh, ...]}
+# ArchiveXL looks a mesh up in that list by its exact path. A refit written to a new path (..._eve.mesh) is not in the
+# list, so it has no appearances at all, and the game crashes when the item is put on (ArchiveXL's log: 'Mesh ... has
+# no appearances and will crash the game when used'). The refit therefore comes with its own .xl that adds the new
+# paths to the same patches (ArchiveXL adds the lists of all .xl files together).
+
+
+def xl_text(f):
+    """An .xl file's text: UTF-8, or Windows-1252 when it isn't valid UTF-8 (never replacement characters)."""
+    b = open(f, "rb").read()
+    try:
+        return b.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return b.decode("cp1252", "replace")
+
+
+def xl_files(paths, meshes=None):
+    """The outfit's .xl files: the ones in the folders of the given files (this tool's own refit .xl files left out).
+    meshes: the outfit's mesh paths. With them, a folder full of other mods' .xl files (an .archive picked in the
+    game's mod folder) is cut down to the files named like one of the given files or mentioning one of the meshes,
+    so only those are parsed."""
+    out = []
+    for d in sorted({os.path.dirname(os.path.abspath(p)) for p in paths}):
+        stems = {
+            os.path.splitext(os.path.basename(p))[0].lower()
+            for p in paths
+            if os.path.dirname(os.path.abspath(p)) == d
+        }
+        for f in sorted(glob.glob(os.path.join(glob.escape(d), "*.xl"))):
+            name = os.path.basename(f)
+            if REFIT_NAME.match(name):
+                continue
+            stem = re.sub(r"(\.archive)?\.xl$", "", name.lower())
+            if meshes is None or stem in stems:
+                out.append(f)
+                continue
+            try:
+                text = rdar.low(re.sub(r"[\\/]+", r"\\", xl_text(f)))
+            except OSError:
+                continue
+            if any(k in text for k in meshes):
+                out.append(f)
+    return out
+
+
+def _get(n, key):
+    """node[key] as yaml-cpp gives it: the first entry with that key."""
+    import yaml
+
+    if isinstance(n, yaml.MappingNode):
+        for k, v in n.value:
+            if isinstance(k, yaml.ScalarNode) and k.value == key:
+                return v
+    return None
+
+
+def _pairs(n):
+    """(key text, value node) of a mapping, repeated keys included (yaml-cpp keeps them all)."""
+    import yaml
+
+    if not isinstance(n, yaml.MappingNode):
+        return []
+    return [(k.value, v) for k, v in n.value if isinstance(k, yaml.ScalarNode)]
+
+
+def _seq(n, scalar=False):
+    """The texts of a list node; scalar=True: a single text counts as a list of one."""
+    import yaml
+
+    if isinstance(n, yaml.SequenceNode):
+        return [x.value for x in n.value if isinstance(x, yaml.ScalarNode)]
+    return [n.value] if scalar and isinstance(n, yaml.ScalarNode) else []
+
+
+def _plain(n):
+    """A node as plain data, every scalar a string (ArchiveXL reads every value as text)."""
+    import yaml
+
+    if isinstance(n, yaml.SequenceNode):
+        return [_plain(x) for x in n.value]
+    if isinstance(n, yaml.MappingNode):
+        return {str(_plain(k)): _plain(v) for k, v in n.value}
+    return n.value
+
+
+def xl_info(files, log=lambda m: None):
+    """-> {'files': number of .xl files read, 'unreadable': [names of .xl files that could not be read],
+           'noyaml': True when the PyYAML package is missing,
+           'patch': [(patch file, {target paths}, props or None, order or None)],
+           'link': {path that is only another name: the file it stands for},
+           'fix': {path: fix definition}}
+    Read the way ArchiveXL does (ResourcePatch / ResourceLink / ResourceMeta Config.cpp, ArchiveXL 1.28): every value
+    is text, a key written twice counts twice, `link: {A: B}` makes A another name for B while `link: {A: [B, C]}`
+    makes B and C other names for A, a scope name among targets stands for the scope's members, a 'props' that is
+    not a list is ignored (the patch then changes everything)."""
+    info = {
+        "files": 0,
+        "unreadable": [],
+        "noyaml": False,
+        "patch": [],
+        "link": {},
+        "fix": {},
+    }
+    if not files:
+        return info
+    try:
+        import yaml
+    except ImportError:
+        info["noyaml"] = True
+        log(
+            "  (the outfit's .xl files can't be read: this installation of the tool lacks its PyYAML part)"
+        )
+        return info
+    scopes, raw, links = {}, [], []
+    for f in files:
+        try:
+            res = _get(yaml.compose(xl_text(f), Loader=yaml.BaseLoader), "resource")
+            got = (
+                [],
+                [],
+                [],
+                {},
+            )  # scopes, patches, links, fixes of this file: kept only when all of it was read
+            for k, v in _pairs(_get(res, "scope")):
+                got[0].append(
+                    (norm_path(k), {norm_path(x) for x in _seq(v, True) if x})
+                )
+            for k, v in _pairs(_get(res, "link")):
+                if isinstance(v, yaml.ScalarNode):
+                    got[2].append(
+                        (norm_path(k), norm_path(v.value))
+                    )  # the key is the other name
+                else:
+                    got[2].extend([(norm_path(x), norm_path(k)) for x in _seq(v) if x])
+            for k, v in _pairs(_get(res, "copy")):
+                got[2].extend(
+                    [(norm_path(x), norm_path(k)) for x in _seq(v, True) if x]
+                )
+            for k, v in _pairs(_get(res, "fix")):
+                if isinstance(v, yaml.MappingNode):
+                    got[3][norm_path(k)] = _plain(v)
+            pn = _get(res, "patch")
+            ents = (
+                [(getattr(_get(e, "source"), "value", None), e) for e in pn.value]
+                if isinstance(pn, yaml.SequenceNode)
+                else _pairs(pn)
+            )
+            for src, d in ents:
+                if not isinstance(src, str) or not src:
+                    continue
+                props = order = None
+                tg = [] if d.tag == "!exclude" else _seq(d, True)
+                if isinstance(d, yaml.MappingNode):
+                    props = tuple(_seq(_get(d, "props"))) or None
+                    order = getattr(_get(d, "order"), "value", None)
+                    order = order if isinstance(order, str) else None
+                    tg = [] if d.tag == "!exclude" else _seq(_get(d, "targets"))
+                tg = {norm_path(x) for x in tg if x}
+                if tg:
+                    got[1].append((norm_path(src), tg, props, order))
+        except Exception as e:  # one broken .xl never stops the refit; the log names it
+            info["unreadable"].append(os.path.basename(f))
+            log(
+                "  (could not read %s: %s)"
+                % (
+                    os.path.basename(f),
+                    " ".join(str(e).split())[:160] or type(e).__name__,
+                )
+            )
+            continue
+        info["files"] += 1
+        for k, v in got[0]:
+            scopes.setdefault(k, set()).update(v)
+        raw += got[1]
+        links += got[2]
+        info["fix"].update(got[3])
+
+    def members(tg):  # a path that is a scope stands for the scope's members
+        for _ in range(8):
+            hit = tg & set(scopes)
+            if not hit:
+                break
+            tg = (tg - hit) | {q for h in hit for q in scopes[h] if q != h}
+        return tg
+
+    for src, tg, props, order in raw:
+        info["patch"].append((src, members(tg) - {src}, props, order))
+    for alias, target in links:
+        for q in members({alias}):
+            if q != target:
+                info["link"][q] = target
+    return info
+
+
+def xl_blind(info):
+    """Why a mesh without materials of its own can't be given any: the reason the outfit's patches are not known, in
+    plain words; None when its .xl files were all read."""
+    if info["noyaml"]:
+        return (
+            "it gets its materials from an .xl file, and this installation of the tool can't read .xl files (its "
+            "PyYAML part is missing; get the tool again)"
+        )
+    if info["unreadable"]:
+        return (
+            "it gets its materials from an .xl file, and the outfit's %s could not be read (there is a mistake in "
+            "it; the line above says where)" % ", ".join(info["unreadable"])
+        )
+    if not info["files"]:
+        return (
+            "it gets its materials from the outfit's .xl file, which is not next to the .archive. Add the outfit's "
+            "download or its folder instead of the .archive alone"
+        )
+    return None
+
+
+def game_archives(game):
+    """The game's .archive files, mods first (where another mod's patch file would be), then the game's own."""
+    out = []
+    for pat in (
+        ("archive", "pc", "mod", "**", "*.archive"),
+        ("mods", "*", "archives", "*.archive"),
+        ("archive", "pc", "ep1", "*.archive"),
+        ("archive", "pc", "content", "*.archive"),
+    ):
+        out += sorted(glob.glob(os.path.join(glob.escape(game), *pat), recursive=True))
+    return out
+
+
+def xl_sources(info, path):
+    """The patch files that add appearances to path: every patch that lists it and may change appearances."""
+    return [
+        src
+        for src, tg, props, _ in info["patch"]
+        if path in tg and (not props or "appearances" in props)
+    ]
+
+
+def xl_extra(info, done):
+    """The .xl text that gives every new path t (done: [(source path s, written path t)]) what ArchiveXL gives s:
+    the same patches and the same fix. -> (text or None, the mesh paths it adds to a patch)."""
+    patch, fix, added = {}, {}, set()
+    for s, t in done:
+        s, t = norm_path(s), norm_path(t)
+        if s == t:
+            continue
+        for src, tg, props, order in info["patch"]:
+            if s in tg and t not in tg:
+                lst = patch.setdefault((src, props, order), [])
+                if t not in lst:
+                    lst.append(t)
+                added.add(t)
+        if s in info["fix"] and t not in info["fix"]:
+            fix[t] = info["fix"][s]
+    if not patch and not fix:
+        return None, added
+    import yaml
+
+    res = {}
+    if (
+        patch
+        and len({k[0] for k in patch}) == len(patch)
+        and not any(k[1] or k[2] is not None for k in patch)
+    ):  # the plain form, as the outfits' own .xl files use it
+        res["patch"] = {src: tg for (src, _, _), tg in patch.items()}
+    elif patch:
+        res["patch"] = [
+            dict(
+                {"source": src, "targets": tg},
+                **({"props": list(props)} if props else {}),
+                **({"order": order} if order is not None else {}),
+            )
+            for (src, props, order), tg in patch.items()
+        ]
+    if fix:
+        res["fix"] = fix
+    return (
+        "# Made by Outfit Refitter. Keep this file next to the refit .archive of the same name.\n"
+        "# It gives the refit meshes the materials that the outfit's own .xl file gives the original meshes.\n"
+        + yaml.safe_dump(
+            {"resource": res},
+            default_flow_style=False,
+            sort_keys=False,
+            width=1000,
+            allow_unicode=True,
+        ),
+        added,
+    )
+
+
+# ---------------- what must not change in a refit mesh ----------------
+
+MESH_LISTS = (
+    "appearances",
+    "materialEntries",
+    "externalMaterials",
+    "localMaterialInstances",
+    "preloadExternalMaterials",
+    "preloadLocalMaterialInstances",
+    "inplaceResources",
+)
+
+
+def mesh_facts(head):
+    """What a mesh file holds besides its shape, from the CR2W objects part (no WolvenKit needed):
+    -> ({object class: count}, {CMesh list property: element count}, index of the local material buffer or None)."""
+    m = OwnMesh.__new__(OwnMesh)  # only its struct reader is used (needs .d and .names)
+    d = m.d = bytes(head)
+    assert d[:4] == b"CR2W", "not CR2W"
+    tabs = [struct.unpack_from("<III", d, 40 + 12 * i) for i in range(10)]
+    m.names = []
+    for i in range(tabs[1][1]):
+        o = tabs[0][0] + struct.unpack_from("<I", d, tabs[1][0] + 8 * i)[0]
+        m.names.append(d[o : d.index(b"\0", o)].decode("latin-1"))
+    classes, at = {}, {}
+    for i in range(tabs[4][1]):
+        e = struct.unpack_from("<HHIIIII", d, tabs[4][0] + 24 * i)
+        c = m.names[e[0]]
+        classes[c] = classes.get(c, 0) + 1
+        at.setdefault(c, e[4])
+    lists, mat = {k: 0 for k in MESH_LISTS}, None
+    if "CMesh" in at:
+        mesh = m.struct(at["CMesh"])[0]
+        for k in MESH_LISTS:
+            if k in mesh:
+                lists[k] = struct.unpack_from("<I", d, mesh[k][1])[0]
+        if "localMaterialBuffer" in mesh:
+            lm = m.struct(mesh["localMaterialBuffer"][1])[0]
+            if "rawData" in lm:
+                i = struct.unpack_from("<I", d, lm["rawData"][1])[0] & 0xFFFF
+                mat = i - 1 if i else None  # buffer numbers start at 1; 0 = no buffer
+    return classes, lists, mat
+
+
+def mat_files(buf):
+    """The material files inside a local material buffer -> [object classes of each, or its size when it can't be
+    read]. ponytail: split at the 'CR2W' mark (a material's own bytes holding that word would split it wrongly;
+    then the refit is refused, not passed)."""
+    at = [m.start() for m in re.finditer(b"CR2W", buf)] + [len(buf)]
+    out = []
+    for i, j in zip(at, at[1:]):
+        try:
+            out.append(sorted(mesh_facts(buf[i:j])[0].items()))
+        except Exception:
+            out.append(j - i)
+    return out
+
+
+def mesh_gate(name, new, src, patched):
+    """A refit mesh against the mesh it was made from -> what is wrong with it, or None.
+    new, src: (CR2W objects part, [(stored buffer, size)]) as rdar.archive_meshes / rdar.loose_mesh give them.
+    patched: True when ArchiveXL adds appearances to this path at load time (it is in an .xl patch list).
+    Only the shape may differ: the same appearance and material objects, the same list lengths, the same material
+    buffer. And a mesh with no appearance of its own that no .xl patch fills in crashes the game when the item is
+    put on, so it never leaves the tool."""
+    try:
+        (c1, l1, m1), (c0, l0, m0) = mesh_facts(new[0]), mesh_facts(src[0])
+    except Exception as e:
+        return "%s: can't be checked (%s)" % (name, str(e)[:100] or type(e).__name__)
+    if l1 != l0:
+        return "%s: %s" % (
+            name,
+            ", ".join(
+                "%s %d (original %d)" % (k, l1[k], l0[k])
+                for k in MESH_LISTS
+                if l1[k] != l0[k]
+            ),
+        )
+    diff = sorted(
+        k
+        for k in set(c0) | set(c1)
+        if c0.get(k, 0) != c1.get(k, 0) and re.search("Appearance|Material", k)
+    )
+    if diff:
+        return "%s: other contents than the original (%s)" % (
+            name,
+            ", ".join(diff)[:200],
+        )
+    if (m0 is None) != (m1 is None):
+        return "%s: material buffer %s" % (name, "added" if m0 is None else "lost")
+    if m0 is not None:
+        # WolvenKit writes the material files inside the buffer anew (other checksums, unused names dropped), so the
+        # bytes may differ: what must stay is how many material files there are and what objects each one holds
+        try:
+            a, b = (
+                mat_files(rdar.seg_raw(*new[1][m1])),
+                mat_files(rdar.seg_raw(*src[1][m0])),
+            )
+        except Exception:
+            a, b = 1, 0
+        if a != b:
+            return "%s: materials differ from the original" % name
+    if not l1["appearances"] and not patched:
+        return (
+            "%s: no appearances (the game would crash when the item is put on)" % name
+        )
+    return None
+
+
+def buffer_gate(arch, src_of, patched=None):
+    """Final check of the packed archive -> list of problems (empty = safe to use).
+    src_of: {mesh path in the archive: the mesh file it was made from}.
+    patched: the mesh paths that get appearances from an .xl patch (None: appearances are not checked)."""
     r = rdar.Rdar(arch)
     bad = [] if r.crc_ok else ["archive index checksum wrong"]
     for name, head, segs in rdar.archive_meshes(arch):
-        sm = src_of.get(name.lower())
+        sm = src_of.get(rdar.low(name))
         if head is None:
             bad.append(name + ": header can't be decoded")
         elif sm and rdar.bad_buffers(head, segs, sm):
@@ -1074,6 +1787,12 @@ def buffer_gate(arch, src_of):
             )
         elif not sm and not all(ok for _, _, ok, _, _ in rdar.stats(head, segs)):
             bad.append(name + ": buffer can't be decoded")
+        elif sm and patched is not None:
+            why = mesh_gate(
+                name, (head, segs), rdar.loose_mesh(sm), rdar.low(name) in patched
+            )
+            if why:
+                bad.append(why)
     return bad
 
 
@@ -1160,7 +1879,11 @@ DEPOT_REF = re.compile(r'"\$value":\s*"([^"]+\.(?:ent|app|mesh))"', re.I)
 
 
 def norm_path(p):
-    return p.replace("\\\\", "\\").lstrip("*").replace("/", "\\").lower()
+    """A depot path the way the game and ArchiveXL hash it (RED4ext ResourcePath::HashSanitized): quotes and leading
+    slashes dropped, any run of / or \\ is one \\, A-Z in lower case (other letters stay as they are). A leading '*'
+    (ArchiveXL's mark for a dynamic path) is dropped too."""
+    p = p.strip().strip("\"'").lstrip("*")
+    return rdar.low(re.sub(r"[\\/]+", r"\\", p).lstrip("\\"))
 
 
 def tweak_items(paths):
@@ -1283,6 +2006,42 @@ def inner_layers(slot, worn):
 # ---------------- one outfit ----------------
 
 
+def chest_role(slot, pts, src):
+    """How a garment is worn on the chest: 'inner' (next to the skin: bras, tops, bodysuits, pasties in a chest
+    slot), 'outer' (worn over other clothes: jackets, coats) or 'other' (not a chest-slot item: the bare chest shows
+    under it unless a chest item is worn too). From the item's outfit slot; without one, from how close the mesh
+    sits to the chest (median height under 12 mm over the skin within 12 cm of the breast tips = inner).
+    ponytail: one median for the whole mesh; a per-item answer needs the item list of the 2.0 plan."""
+    if slot:
+        group = LAYER_SLOTS[slot][0]
+        if group == "legs":
+            return "other"
+        return (
+            "inner"
+            if slot in ("TorsoUnder", "TorsoInner", "BodyUnder", "BodyInner")
+            else "outer"
+        )
+    tips = breast_tips(src)
+    near = pts[np.linalg.norm(pts[:, None] - tips[None], axis=2).min(1) < 0.12]
+    if len(near) < 20:
+        return "outer"
+    return "inner" if np.median(np.abs(skin_height(near, src)[0])) < 0.012 else "outer"
+
+
+def with_nipples(cage, key):
+    """The body shape `cage` plus the nipple mesh the game shows on V (the 'nipples' folder of the body's cage): the base
+    game's own small patch, which the Hyst bodies leave at the vanilla chest's place, so on Angel it sticks out of
+    the upper breast by up to 2.6 mm (5.3 mm over the natural chest). Part of the surface a garment must clear."""
+    g = sorted(
+        glob.glob(
+            os.path.join(
+                os.path.dirname(spec_opts(cage.split(";")[0])[0]), "nipples", "*.glb"
+            )
+        )
+    )
+    return cage + ";" + g[0] + "|extra" if g else cage
+
+
 SHAPE_TAG = re.compile(r"\bhyst_boobs_[a-z]+\b")
 MESH_PATH = re.compile(r"\*?[A-Za-z0-9_\\/.\-{}]+\.mesh")
 ENT_PATH = re.compile(r"\*?[A-Za-z0-9_\\/.\-{}]+\.ent\b")
@@ -1356,14 +2115,23 @@ def refit_mod(
     origin=None,
     replace_own=False,
     copy_moves=False,
+    chest_room=0,
+    pasties_shift=0,
+    incomplete=None,
 ):
     """arcs: the outfit's .archive files, made for body src_body; refit to body tgt (body tags; cages: {tag: glbs}).
+    incomplete: a list that gets a line for every part that was left out although it belongs to the refit (its
+    materials come from an .xl file the tool could not get at): the refit then works but is not the whole outfit.
     origin: files whose surroundings hold the outfit's r6\\tweaks .yaml (default arcs), for the garment layers.
     replace_own: also refit {body} parts the mod already has a target-body version of, and replace that version
     (the output then loads first: '!!!').
     copy_moves: clothing close to the body gets the body's skin weights (copy_weights), so it moves with the body,
     also with rig / breast physics mods. Meshes written without WolvenKit's import (own reader, rebuilt big
     buffers) keep their own weights; the log says so.
+    chest_room: 'Adjust room at the chest' in mm (-2 .. +6, 0 = the normal fit): every part over the chest sits that
+    much further from the skin (negative: closer, never below the hard minimum), see fit2.chest_room (fit 2.0 only).
+    pasties_shift: 'Move pasties up / down' in mm (-30 .. +30, positive = up): meshes that are small chest pieces
+    (fit2.chest_pieces) slide that far along the skin; the log names them (fit 2.0 only).
     -> path of the written refit archive, or None if nothing needed a refit.
     Raises ToolError when nothing could be refit or the final safety check fails."""
     sx, tx = xl_name(src_body), xl_name(tgt)
@@ -1386,7 +2154,7 @@ def refit_mod(
             )
         )
     meshes = {
-        os.path.relpath(p, src).replace("/", "\\").lower(): p
+        norm_path(os.path.relpath(p, src)): p
         for p in glob.glob(os.path.join(src, "**", "*.mesh"), recursive=True)
     }
     if not meshes:
@@ -1421,10 +2189,17 @@ def refit_mod(
             r"\*?[A-Za-z0-9_\\/.\-{}]+\{body\}[A-Za-z0-9_\\/.\-{}]*\.mesh",
             open(f, encoding="utf-8", errors="ignore").read(),
         ):
-            dyn.add(
-                m.group().replace("\\\\", "\\").lstrip("*").replace("/", "\\").lower()
-            )
+            dyn.add(norm_path(m.group()))
     shape_tags = shapes_by_mesh(js)
+    xl = xl_info(xl_files(origin or arcs, set(meshes)), log)
+    # only a real file counts as the outfit's own version for the target body. A path its .xl merely links to
+    # another body's mesh (..._angel -> ..._ebb) is refit like a missing one: the real file takes the link's place
+    own_version = "the mod already has a %s version%s" % (
+        body_name(tgt),
+        ""
+        if replace_own
+        else " (tick 'Replace the outfit's own version' to refit it anyway)",
+    )
     jobs, covered, skipped = [], set(), []  # jobs: (source rel path, target rel path)
     for pat in sorted(dyn):
         pat = pat.replace("{gender}", "w")  # ArchiveXL: female V -> "w"
@@ -1434,19 +2209,10 @@ def refit_mod(
         s, t = pat.replace("{body}", sx), pat.replace("{body}", tx)
         fam = re.escape(pat).replace(r"\{body\}", r"[a-z0-9_]+")
         covered |= {k for k in meshes if re.fullmatch(fam, k)}
-        if t in meshes and not (replace_own and s in meshes):
-            skipped.append(
-                (
-                    t,
-                    "the mod already has a %s version%s"
-                    % (
-                        body_name(tgt),
-                        ""
-                        if replace_own
-                        else " (tick 'Replace the outfit's own version' to refit it anyway)",
-                    ),
-                )
-            )
+        if is_male(s, meshes):
+            skipped.append((s, "male mesh"))
+        elif t in meshes and not (replace_own and s in meshes):
+            skipped.append((t, own_version))
         elif s in meshes:
             jobs.append((s, t))
         else:
@@ -1465,7 +2231,7 @@ def refit_mod(
         ):  # bundled with the outfit: refit, it would replace the user's own body
             skipped.append((k, "a body file, not clothing (left out of the refit)"))
             continue
-        if MALE.search(k):
+        if is_male(k, meshes):
             skipped.append((k, "male mesh"))
             continue
         if stem.endswith(
@@ -1474,10 +2240,80 @@ def refit_mod(
             t = k[: -len(sx) - 5] + tx + ".mesh"
             if t not in meshes or replace_own:
                 jobs.append((k, t))
+            else:
+                skipped.append((t, own_version))
             continue
         if BODY_SUFFIX.search(stem):
             continue
         jobs.append((k, k))  # static: override in place
+    seen_src, archives = {}, []
+
+    def delivers(p):
+        """Can patch file p add appearances to a mesh? True / False; None: the file is neither in the outfit nor in
+        the game (it comes with another mod).
+        ponytail: reads every archive index of the game until the file is found, once per patch file"""
+        if p not in seen_src:
+            head = None
+            try:
+                if p in meshes:
+                    head = rdar.loose_mesh(meshes[p])[0]
+                elif game:
+                    archives[:] = archives or game_archives(game)
+                    head = rdar.find_file(archives, p)[0]
+                seen_src[p] = head and mesh_facts(head)[1]["appearances"] > 0
+            except Exception:
+                seen_src[p] = None
+        return seen_src[p]
+
+    def app_state(*paths):
+        """Do the .xl patches give one of these paths appearances? 'yes'; 'no': their patch files hold none;
+        'unknown': a patch file is not to be found; 'none': the paths are in no patch list."""
+        got = [delivers(p) for k in paths for p in xl_sources(xl, k)]
+        return (
+            "yes"
+            if True in got
+            else "unknown"
+            if None in got
+            else "no"
+            if got
+            else "none"
+        )
+
+    needs = {}  # patch file that is not to be found: the new meshes that depend on it
+    for s, t in list(jobs):
+        try:
+            classes, lists, _ = mesh_facts(rdar.loose_mesh(meshes[s])[0])
+        except Exception:  # not readable this way: WolvenKit / the own reader decide below, the final check judges
+            continue
+        why = None
+        if "rendRenderMeshBlob" not in classes:
+            why = "it holds materials only, no shape (nothing to refit)"
+        elif s != t and not lists["appearances"]:
+            # a copy at a new path has no appearances unless an .xl patch adds them: without, the game crashes when
+            # the item is put on
+            st = app_state(s)
+            if st == "none":
+                why = xl_blind(xl)
+                if why and incomplete is not None:
+                    incomplete.append(
+                        "%s was left out: %s" % (os.path.basename(s), why)
+                    )
+                why = (
+                    why
+                    or "it has no materials of its own and the outfit's .xl files give it none"
+                )
+            elif st == "no":
+                why = (
+                    "the file the outfit's .xl takes its materials from (%s) holds none"
+                    % ", ".join(os.path.basename(p) for p in xl_sources(xl, s))
+                )
+            elif st == "unknown":
+                for p in xl_sources(xl, s):
+                    if delivers(p) is None:
+                        needs.setdefault(p, []).append(t)
+        if why:
+            jobs.remove((s, t))
+            skipped.append((s, why))
     if not jobs:
         for s, why in skipped:
             log("  skipped %s: %s" % (os.path.basename(s), why))
@@ -1493,10 +2329,27 @@ def refit_mod(
             "  replacing the outfit's own %s version of: %s"
             % (body_name(tgt), ", ".join(os.path.basename(t) for t in replaced))
         )
+    linked = sorted(
+        {os.path.basename(xl["link"][t]) for s, t in jobs if s != t and t in xl["link"]}
+    )
+    if linked:
+        log(
+            "  The outfit has no %s shape of its own: its .xl file uses %s for that body. The refit of its %s shape "
+            "takes that place."
+            % (body_name(tgt), ", ".join(linked), body_name(src_body))
+        )
+    for p, ts in needs.items():
+        log(
+            "  Note: %d mesh(es) of this refit take their materials from %s, which is neither in this outfit nor in your "
+            "game. It comes with another mod that the outfit needs (the original outfit needs it just the same). "
+            "Install that mod too, or the game crashes when the item is put on."
+            % (len(ts), p)
+        )
     slots = {}
-    if len(jobs) > 1:
+    if len(jobs) > 1 or ENGINE == 2:
         slots = garment_slots(src, js, tweak_items(origin or arcs), sx, wk, game)
         slots = {s: slots[s] for s, _ in jobs if s in slots}
+    if len(jobs) > 1:
         rank = lambda s: LAYER_SLOTS[slots[s]][1] if s in slots else 0
         jobs.sort(key=lambda st: rank(st[0]))  # inner layers first
         if any(under(a, b) for a in slots.values() for b in slots.values()):
@@ -1508,7 +2361,7 @@ def refit_mod(
                     if s in slots
                 )
             )
-    both_said = []
+    both_said, said = [], set()
     worn = []  # (slot, [(LOD, refit positions)]) of the refit garments with a layer slot
     done, glbs = [], {}
 
@@ -1544,7 +2397,7 @@ def refit_mod(
         if c_tgt == cages[tgt]:
             also = shape_cage(cages[tgt], tgt, bodies()["bodies"][tgt].get("uncovered"))
             also = also if also != cages[tgt] else None
-        if also and not both_said:
+        if also and not both_said and ENGINE != 2:
             both_said.append(1)
             log(
                 "  Fit to both of %s's chest shapes (under clothes and bare), with extra room under the breasts"
@@ -1581,6 +2434,17 @@ def refit_mod(
                 skipped.append((s, "WolvenKit can't read this mesh"))
                 continue
         stem = os.path.splitext(os.path.basename(s))[0]
+        if (
+            "_fpp" in stem.lower()
+            and (np.abs(pts[:, 0]) > 0.2).mean() > 0.8  # beside the torso: on the arms
+            and np.median(np.abs(skin_height(pts, c_src)[0])) > 0.015
+        ):
+            # first-person arm pieces (gloves, sleeves) are modelled on the first-person arms, which stand 4-7 cm
+            # away from the body shape used here; the arms are the same on every body, so they stay as they are
+            as_is(
+                s, t, "a first-person arm piece (the arms are the same on every body)"
+            )
+            continue
         if not BODY_SUFFIX.search(stem) and far_from_body(pts, (c_src, c_tgt)):
             as_is(s, t, "not worn on the body (same on every body)")
             continue
@@ -1588,11 +2452,40 @@ def refit_mod(
         os.makedirs(os.path.join(raw, tdir), exist_ok=True)
         os.makedirs(os.path.join(pack, tdir), exist_ok=True)
         inner = inner_layers(slots.get(s), worn)
+        # fit 2.0: which chest the game shows under this garment
+        shown, red_cap, role = None, False, None
+        if ENGINE == 2:
+            role = chest_role(slots.get(s), pts, c_src)
+            nip = lambda c: with_nipples(c, tgt)
+            if also and role == "inner":
+                # an innermost chest garment: the game shows the normal chest under a chest item (tested in game on
+                # Angel and EVE), so the garment fits that shape alone, as tight as its author made it
+                shown, red_cap = [nip(c_tgt)], PAINT_CAP and bool(bodies()["bodies"][tgt].get("cap_red"))
+            else:
+                shown = [nip(c_tgt)] + ([nip(also)] if also else [])
+            if also and role not in said:
+                said.add(role)
+                log(
+                    "  %s: %s"
+                    % (
+                        os.path.basename(t),
+                        "worn next to the skin on the chest: fit to %s's normal chest (the game shows that shape "
+                        "under a chest item)" % body_name(tgt)
+                        if role == "inner"
+                        else "fit to both of %s's chest shapes (under clothes and bare)"
+                        % body_name(tgt),
+                    )
+                )
         lift = lambda k: ", %d lifted over the layer under it" % k if k else ""
         if own:  # split by render chunk: each chunk's LOD meets the same LOD of the inner layers
             cut = np.cumsum([n for _, _, n in own.spans])[:-1]
             parts = list(zip(own.lods, np.split(pts, cut)))
-            Qs, pushed, lifted = refit_parts(parts, c_src, c_tgt, inner, also)
+            if ENGINE == 2:
+                Qs, pushed, lifted = refit_lods(
+                    [dict(lod=lod, P=P) for lod, P in parts], c_src, c_tgt, inner, shown, chest_room / 1000.0, pasties_shift / 1000.0
+                )[:3]
+            else:
+                Qs, pushed, lifted = refit_parts(parts, c_src, c_tgt, inner, also)
             try:
                 data = own_refit(own, from_glb_space(np.vstack(Qs)))
             except Exception as e:
@@ -1621,8 +2514,9 @@ def refit_mod(
         os.makedirs(os.path.dirname(g2), exist_ok=True)
         shutil.copy(g, g2)
         try:
+            stats = {}
             nv, pushed, lifted, parts, copied, gs = refit_glb(
-                g, tglb, c_src, c_tgt, inner, copy_moves, also
+                g, tglb, c_src, c_tgt, inner, copy_moves, also, shown, red_cap, stats, chest_room / 1000.0, pasties_shift / 1000.0
             )
         except Exception as e:  # one odd mesh (or too little memory for it) never costs the rest of the outfit
             skipped.append(
@@ -1643,6 +2537,14 @@ def refit_mod(
                 + (", its squashed shape (garment support) refit too" if gs else ""),
             )
         )
+        if stats:
+            import fit2
+
+            log("    " + fit2.report_text(stats))
+            if stats.get("slide_skipped"):
+                log("    (too many vertices for the sliding step: placed by the skin spots alone)")
+            if stats.get("shifted"):
+                log("    a small chest piece: moved %d mm %s along the skin" % (abs(pasties_shift), "up" if pasties_shift > 0 else "down"))
         shutil.copy(meshes[s], os.path.join(pack, t))
         done.append((s, t))
         if s in slots:
@@ -1690,7 +2592,12 @@ def refit_mod(
     if not arch:
         raise ToolError("WolvenKit could not pack the refit into an .archive file.")
     progress(0.95)
-    bad = buffer_gate(arch, {t: meshes[s] for s, t in done})
+    # appearances: a mesh that stays at its own path keeps what the game gives that path; a new path needs its own
+    # appearances or a place in an .xl patch list (the outfit's, or the one written beside the refit)
+    xl_text, xl_new = xl_extra(xl, done)
+    # (the new path gets the patches of the mesh it was made from; a patch file that holds no appearances gives none)
+    patched = {t for s, t in done if s == t or app_state(s, t) in ("yes", "unknown")}
+    bad = buffer_gate(arch, {t: meshes[s] for s, t in done}, patched)
     if bad:  # never hand out an archive with broken buffers
         raise ToolError(
             "the safety check found broken data, so no file was written: "
@@ -1699,10 +2606,17 @@ def refit_mod(
     final = os.path.join(
         out, ("!!!" if static else "") + tgt.capitalize() + "Refit_" + name + ".archive"
     )
+    final_xl = xl_beside(final)
+    if xl_text:  # written first: the archive is never there without it
+        with open(final_xl + ".part", "w", encoding="utf-8", newline="\n") as f:
+            f.write(xl_text)
+        os.replace(final_xl + ".part", final_xl)
     shutil.move(
         arch, final + ".part"
     )  # across drives this is a copy: the final name only when complete
     os.replace(final + ".part", final)
+    if not xl_text and os.path.exists(final_xl):
+        os.remove(final_xl)  # left from an earlier refit of this outfit
     log(
         "Done: %s (%d mesh(es) refit%s)"
         % (
@@ -1711,4 +2625,9 @@ def refit_mod(
             ", replaces the original meshes" if static else "",
         )
     )
+    if xl_text:
+        log(
+            "  with %s: it gives the %d new mesh(es) the outfit's materials. The two files belong together."
+            % (os.path.basename(final_xl), len(xl_new))
+        )
     return final

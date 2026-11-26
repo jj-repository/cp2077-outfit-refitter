@@ -25,7 +25,35 @@ if (
     except OSError:
         DATA = _OLD_DATA
 
-VERSION = "1.9.2"
+VERSION = "2.0"  # also in version_info.txt (the exe's properties)
+
+
+def pasties_value(on, text):
+    """'Move pasties up / down' as whole mm: 0 when the box is unticked or the text is no number; else the number
+    rounded and kept within -30 .. +30."""
+    if not on:
+        return 0
+    try:
+        v = float(str(text).replace(",", ".").replace("mm", "").strip())
+    except (ValueError, OverflowError):
+        return 0
+    if v != v or v in (float("inf"), float("-inf")):  # nan, inf: no number
+        return 0
+    return int(min(30, max(-30, round(v))))
+
+
+def chest_room_value(on, text):
+    """'Adjust room at the chest' as mm: 0.0 when the box is unticked or the text is no number; else the number
+    (decimal comma allowed) rounded to 0.5 and kept within -2 .. +6."""
+    if not on:
+        return 0.0
+    try:
+        v = float(str(text).replace(",", ".").replace("mm", "").strip())
+    except (ValueError, OverflowError):
+        return 0.0
+    if v != v or v in (float("inf"), float("-inf")):  # nan, inf: no number
+        return 0.0
+    return min(6.0, max(-2.0, round(v * 2) / 2))
 
 
 def documents_dir():
@@ -645,6 +673,26 @@ def cage_dir(tag):
     return os.path.join(DATA, "cages", "van" if tag == "vanilla" else tag)
 
 
+def ensure_nipples(d, game, wk):
+    """The base game's nipple mesh as a glb in the 'nipples' folder of cage folder d (bodies.json 'nipples'), read
+    once from the game's own archives. Without it (not found, WolvenKit fails) the fit goes on without that
+    surface."""
+    m = bodies().get("nipples")
+    od = os.path.join(d, "nipples")
+    if not m or glob.glob(os.path.join(od, "*.glb")):
+        return
+    tmp = tempfile.mkdtemp(prefix="nip_", dir=_work_root())
+    try:
+        for s in vanilla_sources(game):
+            run([wk, "unbundle", s, "-o", tmp, "-r", "^" + re.escape(m) + "$"], game)
+        os.makedirs(od, exist_ok=True)
+        run([wk, "export", os.path.join(tmp, m), "-o", od, "-gp", game], game)
+    except (RuntimeError, OSError):
+        shutil.rmtree(od, ignore_errors=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def ensure_cages(key, sources, game, wk, log):
     """Body shape glbs for body tag key in cage_dir(key), extracted with WolvenKit from sources (the base game's
     content folder, or the user's body mod: an installed .archive or a picked download). Re-extracted when the source
@@ -659,6 +707,7 @@ def ensure_cages(key, sources, game, wk, log):
             and open(os.path.join(d, "source.txt"), encoding="utf-8").read() == stamp
             and (not shapes or os.path.isfile(os.path.join(d, "shapes.txt")))
         ):
+            ensure_nipples(d, game, wk)
             return ";".join(glbs)
     except (OSError, ValueError):
         pass
@@ -715,6 +764,7 @@ def ensure_cages(key, sources, game, wk, log):
                 " ".join(got)
             )
         open(os.path.join(d, "source.txt"), "w", encoding="utf-8").write(stamp)
+        ensure_nipples(d, game, wk)
         return ";".join(glbs)
     except Exception:
         shutil.rmtree(d, ignore_errors=True)
@@ -1194,22 +1244,55 @@ def _refit_body(name):
     return m.group(1).lower() if m else None
 
 
+def xl_beside(archive):
+    """The .xl file a refit .archive can come with (refit.xl_extra), whether it is there or not. It gives new mesh
+    paths the outfit's materials; without it those meshes crash the game, so the two always travel together."""
+    return archive[: -len(".archive")] + ".xl"
+
+
+def refit_files(archive):
+    """A finished refit as the files to hand out: its .xl first (when it has one), then the .archive."""
+    x = xl_beside(archive)
+    return ([x] if os.path.isfile(x) else []) + [archive]
+
+
 def install(files, game, log, outfit=""):
     r"""Copy refits into archive\pc\mod and add them to the uninstall list."""
     lst = installed()
     mine = {_key(e) for e in lst}
+    now = {
+        os.path.normcase(os.path.join(mod_dir(game), os.path.basename(f)))
+        for f in files
+    }
+    # the files of one call are one refit (.xl + .archive): all of them are installed or none. A file of the same name
+    # that this tool did not put there is never replaced, so it holds back its partner as well (an .archive without
+    # its .xl crashes the game)
+    foreign = [
+        os.path.basename(f)
+        for f in files
+        if os.path.exists(os.path.join(mod_dir(game), os.path.basename(f)))
+        and os.path.normcase(os.path.join(mod_dir(game), os.path.basename(f)))
+        not in mine
+        and os.path.normcase(os.path.abspath(f))
+        != os.path.normcase(os.path.join(mod_dir(game), os.path.basename(f)))
+    ]
+    for f in files if foreign else ():
+        name = os.path.basename(f)
+        log(
+            "Not installed: %s already exists in the game and was not made by this tool."
+            % name
+            if name in foreign
+            else "Not installed: %s (it only works together with %s)."
+            % (name, ", ".join(foreign))
+        )
+    if foreign:
+        return
     for f in files:
         dst = os.path.join(mod_dir(game), os.path.basename(f))
         k = os.path.normcase(dst)
         same = (
             os.path.normcase(os.path.abspath(f)) == k
         )  # output folder = the game's mod folder itself
-        if os.path.exists(dst) and k not in mine and not same:
-            log(
-                "Not installed: %s already exists in the game and was not made by this tool."
-                % os.path.basename(f)
-            )
-            continue
         if not same:
             _copy(f, dst)
         lst = [e for e in lst if _key(e) != k] + [_entry(dst, game, "refit", outfit)]
@@ -1225,7 +1308,7 @@ def install(files, game, log, outfit=""):
             if e.get("kind") == "refit"
             and outfit
             and outfit_key(e.get("outfit")) == outfit_key(outfit)
-            and _key(e) != k
+            and _key(e) not in now
             and (
                 e["file"].startswith("!")
                 or (_refit_body(f) and _refit_body(e["file"]) == _refit_body(f))
@@ -1343,7 +1426,13 @@ def uninstall(entries, log, locked=False, game=None):
         with (
             INSTALL_LOCK
         ):  # never at the same time as a refit being installed (both write the list)
-            return uninstall(entries, log, True, game)
+            # a refit's .archive and its .xl go together: the .archive alone would crash the game
+            swap = lambda k: (
+                k[:-8] + ".xl" if k.endswith(".archive") else k[:-3] + ".archive"
+            )
+            pair = {swap(_key(e)) for e in entries if e.get("kind") == "refit"}
+            more = [e for e in installed() if _key(e) in pair and e not in entries]
+            return uninstall(entries + more, log, True, game)
     gone = {_key(e) for e in entries}
     keep = []
     for e in installed():
@@ -1454,6 +1543,8 @@ def run_batch(
     replace_own=False,
     copy_moves=False,
     make_zip=False,
+    chest_room=0.0,
+    pasties_shift=0,
 ):
     """Refit every input from body src (the body the outfits are made for) to body tag. -> list of (input, output
     archive or None, message, original missing).
@@ -1462,7 +1553,9 @@ def run_batch(
     cancel: a threading.Event; once set, nothing more is installed and no further outfit is started.
     replace_own: also refit parts the outfit already ships a version for body tag of, replacing that version.
     copy_moves: clothing close to the body gets the body's movement (skin weights), see refit.copy_weights.
-    make_zip: also pack each refit into its own zip (archive/pc/mod/...) for Vortex / Mod Organizer 2."""
+    make_zip: also pack each refit into its own zip (archive/pc/mod/...) for Vortex / Mod Organizer 2.
+    chest_room: 'Adjust room at the chest' in mm (-2 .. +6, 0 = the normal fit), see refit.refit_mod.
+    pasties_shift: 'Move pasties up / down' in mm (-30 .. +30, 0 = the normal place), see refit.refit_mod."""
     import refit
 
     cancel = cancel or threading.Event()
@@ -1488,6 +1581,7 @@ def run_batch(
         work = tempfile.mkdtemp(prefix="job_", dir=_work_root())
         try:
             arcs = prepare_input(inp, os.path.join(work, "in"), log, src, game)
+            left_out = []  # parts that belong to the refit but could not be made (refit_mod's 'incomplete')
             res = refit.refit_mod(
                 arcs,
                 name,
@@ -1506,12 +1600,24 @@ def run_batch(
                 else arcs,
                 replace_own,
                 copy_moves,
+                chest_room,
+                pasties_shift,
+                left_out,
             )
+            if left_out:
+                log(
+                    "%s: %s"
+                    % (
+                        "This refit is INCOMPLETE" if res else "Nothing could be refit",
+                        "; ".join(left_out),
+                    )
+                )
             missing = bool(res) and original_missing(arcs, game)
             if res and make_zip:
                 zp = os.path.splitext(res)[0] + ".zip"
                 with zipfile.ZipFile(zp + ".part", "w", zipfile.ZIP_DEFLATED) as z:
-                    z.write(res, "archive/pc/mod/" + os.path.basename(res))
+                    for f in refit_files(res):
+                        z.write(f, "archive/pc/mod/" + os.path.basename(f))
                 os.replace(zp + ".part", zp)
                 log("Zip for Vortex / Mod Organizer 2: %s" % os.path.basename(zp))
             if res and do_install:
@@ -1519,7 +1625,7 @@ def run_batch(
                     if cancel.is_set():
                         log("Stopped before installing.")
                         break
-                    install([res], game, log, shown)
+                    install(refit_files(res), game, log, shown)
                     if missing:
                         root = inp if os.path.isdir(inp) else os.path.join(work, "in")
                         n = install_original(
@@ -1540,7 +1646,10 @@ def run_batch(
                         log("Original outfit already installed — kept as is")
             elif missing:
                 log(MISSING_TEXT % shown)
-            results.append((inp, res, "ok" if res else "nothing to refit", missing))
+            msg = "ok" if res else "nothing to refit"
+            if left_out:
+                msg = ("incomplete: " if res else "nothing could be refit: ") + "; ".join(left_out)
+            results.append((inp, res, msg, missing))
         except (
             Exception
         ) as e:  # keep going with the next outfit; full detail goes to the log
